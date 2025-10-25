@@ -2,8 +2,6 @@ import os
 import logging
 import sqlite3
 import json
-import requests
-import sys
 from datetime import datetime
 from flask import Flask, jsonify, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -340,10 +338,10 @@ def init_bot():
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         
         logger.info("✅ Bot initialized successfully")
-        return application
+        return True
     except Exception as e:
         logger.error(f"❌ Failed to initialize bot: {e}")
-        return None
+        return False
 
 # ==================== ОБРАБОТЧИКИ КОМАНД ====================
 
@@ -951,27 +949,12 @@ def webhook():
         application.update_queue.put(update)
     return "ok"
 
-@app.route('/set_webhook', methods=['GET'])
-def set_webhook():
-    """Установка webhook"""
-    try:
-        webhook_url = f"https://{request.host}/webhook"
-        # На Render просто возвращаем успех, webhook будет работать автоматически
-        return jsonify({
-            "status": "success", 
-            "message": "Webhook is ready",
-            "webhook_url": webhook_url
-        })
-    except Exception as e:
-        return jsonify({"status": "error", "error": str(e)}), 500
-
 # ==================== ЗАПУСК ПРИЛОЖЕНИЯ ====================
 
 def main():
     """Основная функция запуска"""
     # Инициализация бота
-    bot = init_bot()
-    if not bot:
+    if not init_bot():
         logger.error("❌ Failed to initialize bot. Exiting.")
         return
     
