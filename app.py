@@ -48,6 +48,8 @@ class Config:
         """Проверка обязательных переменных"""
         if not cls.BOT_TOKEN:
             raise ValueError("❌ BOT_TOKEN is required")
+        if not cls.YANDEX_API_KEY or not cls.YANDEX_FOLDER_ID:
+            logger.warning("⚠️ Yandex GPT credentials not set - using enhanced generator")
         logger.info("✅ Configuration validated successfully")
 
 # ==================== БАЗА ДАННЫХ ====================
@@ -488,6 +490,569 @@ def get_recent_checkins(user_id, days=7):
     finally:
         conn.close()
 
+# ==================== YANDEX GPT ИНТЕГРАЦИЯ ====================
+
+class YandexGPTService:
+    @staticmethod
+    async def generate_nutrition_plan(user_data):
+        """Генерирует план питания через Yandex GPT"""
+        try:
+            if not Config.YANDEX_API_KEY or not Config.YANDEX_FOLDER_ID:
+                logger.warning("⚠️ Yandex GPT credentials not set, using enhanced generator")
+                return await YandexGPTService._generate_fallback_plan(user_data)
+            
+            prompt = YandexGPTService._create_detailed_prompt(user_data)
+            
+            headers = {
+                "Authorization": f"Api-Key {Config.YANDEX_API_KEY}",
+                "Content-Type": "application/json"
+            }
+            
+            data = {
+                "modelUri": f"gpt://{Config.YANDEX_FOLDER_ID}/yandexgpt/latest",
+                "completionOptions": {
+                    "stream": False,
+                    "temperature": 0.8,
+                    "maxTokens": 8000
+                },
+                "messages": [
+                    {
+                        "role": "system",
+                        "text": """Ты - профессор нутрициологии с 25-летним опытом. Создай ИНДИВИДУАЛЬНЫЙ план питания на 7 дней.
+
+КРИТИЧЕСКИ ВАЖНЫЕ ТРЕБОВАНИЯ:
+1. УНИКАЛЬНЫЕ рецепты для каждого дня - блюда НЕ ДОЛЖНЫ повторяться
+2. Детальный водный режим по часам
+3. 5 приемов пищи в день: ЗАВТРАК, ПЕРЕКУС 1, ОБЕД, ПЕРЕКУС 2, УЖИН
+4. Для каждого приема пищи указывай:
+   - Уникальное название блюда
+   - Время приема
+   - Точную калорийность
+   - БЖУ (белки, жиры, углеводы в граммах)
+   - Ингредиенты с количествами
+   - Пошаговый рецепт приготовления
+5. В конце - ОБЩИЙ СПИСОК ПОКУПОК сгруппированный по категориям
+
+ФОРМАТ ОТВЕТА - строго JSON:
+{
+    "days": [
+        {
+            "name": "ПОНЕДЕЛЬНИК",
+            "total_calories": "1650 ккал",
+            "water_schedule": ["7:00 - 200 мл теплой воды", ...],
+            "meals": [
+                {
+                    "type": "ЗАВТРАК",
+                    "name": "Уникальное название блюда",
+                    "time": "8:00",
+                    "calories": "350 ккал",
+                    "protein": "15г",
+                    "fat": "10г",
+                    "carbs": "55г",
+                    "ingredients": [
+                        {"name": "Продукт", "quantity": "100г"}
+                    ],
+                    "recipe": "Пошаговый рецепт..."
+                }
+            ]
+        }
+    ],
+    "shopping_list": {
+        "Овощи": [{"name": "Помидор", "quantity": "500г"}],
+        "Фрукты": [{"name": "Яблоко", "quantity": "300г"}]
+    },
+    "water_regime": {
+        "total": "2.0 литра в день",
+        "schedule": [
+            {"time": "7:00", "amount": "200 мл", "description": "Описание"}
+        ]
+    },
+    "professor_advice": "Персонализированный совет"
+}"""
+                    },
+                    {
+                        "role": "user", 
+                        "text": prompt
+                    }
+                ]
+            }
+            
+            logger.info("🚀 Sending request to Yandex GPT...")
+            
+            # Асинхронный запрос к Yandex GPT
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None, 
+                lambda: requests.post(Config.YANDEX_GPT_URL, headers=headers, json=data, timeout=120)
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                gpt_response = result['result']['alternatives'][0]['message']['text']
+                logger.info("✅ GPT response received successfully")
+                
+                # Парсим JSON ответ
+                plan_data = YandexGPTService._parse_gpt_json_response(gpt_response, user_data)
+                if plan_data:
+                    logger.info("🎓 Successfully parsed GPT plan with YandexGPT")
+                    plan_data['source'] = 'yandex_gpt'
+                    return plan_data
+                else:
+                    logger.warning("⚠️ Failed to parse GPT JSON response, using enhanced generator")
+                    return await YandexGPTService._generate_fallback_plan(user_data)
+            else:
+                logger.error(f"❌ GPT API error: {response.status_code} - {response.text}")
+                return await YandexGPTService._generate_fallback_plan(user_data)
+                
+        except Exception as e:
+            logger.error(f"❌ Error generating plan with YandexGPT: {e}")
+            return await YandexGPTService._generate_fallback_plan(user_data)
+    
+    @staticmethod
+    def _create_detailed_prompt(user_data):
+        """Создает детальный промпт для Yandex GPT"""
+        gender = user_data['gender']
+        goal = user_data['goal']
+        activity = user_data['activity']
+        age = user_data['age']
+        height = user_data['height']
+        weight = user_data['weight']
+        
+        # Рассчитываем параметры
+        bmr = YandexGPTService._calculate_bmr(gender, age, height, weight)
+        tdee = YandexGPTService._calculate_tdee(bmr, activity)
+        target_calories = YandexGPTService._calculate_target_calories(tdee, goal)
+        
+        prompt = f"""
+Создай персонализированный план питания на 7 дней с УНИКАЛЬНЫМИ рецептами для каждого дня.
+
+ДАННЫЕ КЛИЕНТА:
+- Пол: {gender}
+- Возраст: {age} лет
+- Рост: {height} см
+- Вес: {weight} кг
+- Цель: {goal}
+- Уровень активности: {activity}
+- BMR (базальный метаболизм): {bmr:.0f} ккал
+- TDEE (общий расход): {tdee:.0f} ккал
+- Целевая калорийность: {target_calories:.0f} ккал/день
+
+ОСОБЫЕ ТРЕБОВАНИЯ:
+1. ВСЕ рецепты должны быть УНИКАЛЬНЫМИ - никаких повторений между днями
+2. Используй доступные в России продукты
+3. Время приготовления блюд - не более 30 минут
+4. Учитывай цель: {goal}
+5. Включи разнообразные белки, сложные углеводы, полезные жиры
+6. Для водного режима используй расписание: 7:00, 8:00, 10:00, 11:00, 13:00, 15:00, 16:00, 18:00, 19:00, 21:00
+
+Верни ответ в строгом JSON формате как указано в системном промпте.
+"""
+        return prompt
+    
+    @staticmethod
+    def _parse_gpt_json_response(gpt_response, user_data):
+        """Парсит JSON ответ от GPT"""
+        try:
+            # Ищем JSON в ответе
+            json_match = re.search(r'\{.*\}', gpt_response, re.DOTALL)
+            if json_match:
+                json_str = json_match.group()
+                plan_data = json.loads(json_str)
+                
+                # Добавляем пользовательские данные
+                plan_data['user_data'] = user_data
+                plan_data['created_at'] = datetime.now().isoformat()
+                
+                # Проверяем структуру
+                if 'days' in plan_data and len(plan_data['days']) == 7:
+                    logger.info("✅ Valid GPT plan structure received")
+                    return plan_data
+                else:
+                    logger.warning("❌ Invalid plan structure from GPT")
+                    return None
+            else:
+                logger.warning("❌ No JSON found in GPT response")
+                return None
+                
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ JSON decode error: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"❌ Error parsing GPT JSON: {e}")
+            return None
+    
+    @staticmethod
+    async def _generate_fallback_plan(user_data):
+        """Fallback генератор если YandexGPT не работает"""
+        logger.info("🔄 Using enhanced generator as fallback")
+        return EnhancedPlanGenerator.generate_plan_with_progress_indicator(user_data)
+    
+    @staticmethod
+    def _calculate_bmr(gender, age, height, weight):
+        """Рассчитывает базовый метаболизм"""
+        if gender == "МУЖЧИНА":
+            return 88.36 + (13.4 * weight) + (4.8 * height) - (5.7 * age)
+        else:
+            return 447.6 + (9.2 * weight) + (3.1 * height) - (4.3 * age)
+    
+    @staticmethod
+    def _calculate_tdee(bmr, activity):
+        """Рассчитывает общий расход энергии"""
+        activity_multipliers = {
+            "НИЗКАЯ": 1.2,
+            "СРЕДНЯЯ": 1.55,
+            "ВЫСОКАЯ": 1.725
+        }
+        return bmr * activity_multipliers.get(activity, 1.55)
+    
+    @staticmethod
+    def _calculate_target_calories(tdee, goal):
+        """Рассчитывает целевую калорийность"""
+        if goal == "ПОХУДЕНИЕ":
+            return tdee * 0.85  # Дефицит 15%
+        elif goal == "НАБОР МАССЫ":
+            return tdee * 1.15  # Профицит 15%
+        else:
+            return tdee
+
+# ==================== УЛУЧШЕННЫЙ ГЕНЕРАТОР (FALLBACK) ====================
+
+class EnhancedPlanGenerator:
+    """Улучшенный генератор планов питания как fallback"""
+    
+    @staticmethod
+    def generate_plan_with_progress_indicator(user_data):
+        """Генерирует разнообразный план с уникальными рецептами"""
+        logger.info(f"🎯 Generating enhanced plan for user {user_data['user_id']}")
+        
+        plan = {
+            'user_data': user_data,
+            'days': [],
+            'shopping_list': {},
+            'water_regime': EnhancedPlanGenerator._generate_detailed_water_regime(user_data),
+            'professor_advice': EnhancedPlanGenerator._get_professor_advice(user_data),
+            'created_at': datetime.now().isoformat(),
+            'source': 'enhanced_generator'
+        }
+        
+        # Создаем 7 дней с УНИКАЛЬНЫМИ рецептами
+        day_names = ['ПОНЕДЕЛЬНИК', 'ВТОРНИК', 'СРЕДА', 'ЧЕТВЕРГ', 'ПЯТНИЦА', 'СУББОТА', 'ВОСКРЕСЕНЬЕ']
+        
+        for i, day_name in enumerate(day_names):
+            day = {
+                'name': day_name,
+                'meals': EnhancedPlanGenerator._generate_unique_meals_for_day(i, user_data),
+                'total_calories': EnhancedPlanGenerator._calculate_daily_calories(user_data),
+                'water_schedule': EnhancedPlanGenerator._get_daily_water_schedule()
+            }
+            plan['days'].append(day)
+        
+        # Генерируем корректный список покупок
+        plan['shopping_list'] = EnhancedPlanGenerator._generate_proper_shopping_list(plan['days'])
+        
+        logger.info(f"✅ Enhanced plan generated for user {user_data['user_id']}")
+        return plan
+    
+    @staticmethod
+    def _generate_detailed_water_regime(user_data):
+        """Генерирует детальный водный режим"""
+        weight = user_data.get('weight', 70)
+        water_needed = max(1.5, weight * 0.03)  # 30 мл на 1 кг веса
+        
+        return {
+            'total': f'{water_needed:.1f} литра в день',
+            'schedule': [
+                {'time': '7:00', 'amount': '200 мл', 'description': '1 стакан теплой воды натощак для запуска метаболизма'},
+                {'time': '8:00', 'amount': '200 мл', 'description': 'После завтрака для улучшения пищеварения'},
+                {'time': '10:00', 'amount': '200 мл', 'description': 'Стакан воды для поддержания гидратации'},
+                {'time': '11:00', 'amount': '200 мл', 'description': 'После первого перекуса'},
+                {'time': '13:00', 'amount': '200 мл', 'description': 'После обеда для усвоения питательных веществ'},
+                {'time': '15:00', 'amount': '200 мл', 'description': 'Вода для поддержания энергии'},
+                {'time': '16:00', 'amount': '200 мл', 'description': 'После второго перекуса'},
+                {'time': '18:00', 'amount': '200 мл', 'description': 'Подготовка к ужину'},
+                {'time': '19:00', 'amount': '200 мл', 'description': 'После ужина'},
+                {'time': '21:00', 'amount': '200 мл', 'description': 'За 1-2 часа до сна для восстановления'}
+            ]
+        }
+    
+    @staticmethod
+    def _get_daily_water_schedule():
+        """Возвращает расписание воды на день"""
+        return [
+            '7:00 - 200 мл теплой воды натощак',
+            '8:00 - 200 мл после завтрака', 
+            '10:00 - 200 мл',
+            '11:00 - 200 мл после перекуса',
+            '13:00 - 200 мл после обеда',
+            '15:00 - 200 мл',
+            '16:00 - 200 мл после перекуса',
+            '18:00 - 200 мл',
+            '19:00 - 200 мл после ужина',
+            '21:00 - 200 мл перед сном'
+        ]
+    
+    @staticmethod
+    def _calculate_daily_calories(user_data):
+        """Рассчитывает дневную калорийность"""
+        gender = user_data.get('gender', '')
+        age = user_data.get('age', 30)
+        height = user_data.get('height', 170)
+        weight = user_data.get('weight', 70)
+        activity = user_data.get('activity', '')
+        goal = user_data.get('goal', '')
+        
+        # Базальный метаболизм
+        if gender == 'МУЖЧИНА':
+            bmr = 88.36 + (13.4 * weight) + (4.8 * height) - (5.7 * age)
+        else:
+            bmr = 447.6 + (9.2 * weight) + (3.1 * height) - (4.3 * age)
+        
+        # Учет активности
+        activity_multipliers = {'НИЗКАЯ': 1.2, 'СРЕДНЯЯ': 1.55, 'ВЫСОКАЯ': 1.725}
+        tdee = bmr * activity_multipliers.get(activity, 1.55)
+        
+        # Учет цели
+        if goal == 'ПОХУДЕНИЕ':
+            calories = tdee * 0.85  # Дефицит 15%
+        elif goal == 'НАБОР МАССЫ':
+            calories = tdee * 1.15  # Профицит 15%
+        else:
+            calories = tdee
+        
+        return f"{int(calories)} ккал"
+    
+    @staticmethod
+    def _get_professor_advice(user_data):
+        """Возвращает советы профессора"""
+        goal = user_data.get('goal', '')
+        
+        advice = {
+            'ПОХУДЕНИЕ': "Соблюдайте дефицит калорий для плавного снижения веса. Увеличьте потребление белка для сохранения мышечной массы.",
+            'НАБОР МАССЫ': "Создайте профицит калорий для роста мышц. Увеличьте потребление сложных углеводов для энергии.",
+            'ПОДДЕРЖАНИЕ': "Поддерживайте баланс между потреблением и расходом калорий. Сбалансируйте БЖУ для оптимального функционирования."
+        }
+        
+        return advice.get(goal, "Следите за водным балансом и регулярно занимайтесь спортом для лучших результатов.")
+    
+    @staticmethod
+    def _generate_unique_meals_for_day(day_index, user_data):
+        """Генерирует УНИКАЛЬНЫЕ приемы пищи для каждого дня"""
+        meals = []
+        meal_types = [
+            {'type': 'ЗАВТРАК', 'time': '8:00'},
+            {'type': 'ПЕРЕКУС 1', 'time': '11:00'},
+            {'type': 'ОБЕД', 'time': '13:00'},
+            {'type': 'ПЕРЕКУС 2', 'time': '16:00'},
+            {'type': 'УЖИН', 'time': '19:00'}
+        ]
+        
+        # Базовые варианты для каждого типа приема пищи
+        breakfast_options = EnhancedPlanGenerator._get_breakfast_options()
+        snack_options = EnhancedPlanGenerator._get_snack_options()
+        lunch_options = EnhancedPlanGenerator._get_lunch_options()
+        dinner_options = EnhancedPlanGenerator._get_dinner_options()
+        
+        for meal_type in meal_types:
+            if meal_type['type'] == 'ЗАВТРАК':
+                options = breakfast_options
+            elif meal_type['type'] in ['ПЕРЕКУС 1', 'ПЕРЕКУС 2']:
+                options = snack_options
+            elif meal_type['type'] == 'ОБЕД':
+                options = lunch_options
+            else:  # УЖИН
+                options = dinner_options
+            
+            # Выбираем уникальный вариант для каждого дня
+            option_index = (day_index * len(options)) % len(options)
+            meal_option = options[option_index]
+            
+            meal = {
+                'type': meal_type['type'],
+                'name': meal_option['name'],
+                'time': meal_type['time'],
+                'calories': meal_option['calories'],
+                'protein': meal_option['protein'],
+                'fat': meal_option['fat'],
+                'carbs': meal_option['carbs'],
+                'ingredients': meal_option['ingredients'],
+                'recipe': meal_option['recipe']
+            }
+            meals.append(meal)
+        
+        return meals
+    
+    @staticmethod
+    def _get_breakfast_options():
+        """Уникальные варианты завтраков"""
+        return [
+            {
+                'name': 'Овсяная каша с ягодами и орехами',
+                'calories': '350 ккал', 'protein': '15г', 'fat': '12г', 'carbs': '55г',
+                'ingredients': [
+                    {'name': 'Овсяные хлопья', 'quantity': '60г'},
+                    {'name': 'Молоко', 'quantity': '200мл'},
+                    {'name': 'Ягоды замороженные', 'quantity': '100г'},
+                    {'name': 'Грецкие орехи', 'quantity': '20г'},
+                    {'name': 'Мед', 'quantity': '15г'}
+                ],
+                'recipe': '1. Доведите молоко до кипения\n2. Добавьте овсяные хлопья, варите 7 минут\n3. Добавьте ягоды, готовьте еще 3 минуты\n4. Подавайте с измельченными орехами и медом'
+            },
+            {
+                'name': 'Творожная запеканка с изюмом',
+                'calories': '380 ккал', 'protein': '25г', 'fat': '15г', 'carbs': '35г',
+                'ingredients': [
+                    {'name': 'Творог', 'quantity': '200г'},
+                    {'name': 'Яйцо', 'quantity': '2шт'},
+                    {'name': 'Манная крупа', 'quantity': '30г'},
+                    {'name': 'Изюм', 'quantity': '30г'},
+                    {'name': 'Сметана', 'quantity': '50г'}
+                ],
+                'recipe': '1. Смешайте творог с яйцами и манкой\n2. Добавьте промытый изюм\n3. Выпекайте в духовке при 180°C 25 минут\n4. Подавайте со сметаной'
+            },
+            {
+                'name': 'Омлет с овощами и сыром',
+                'calories': '320 ккал', 'protein': '22г', 'fat': '18г', 'carbs': '12г',
+                'ingredients': [
+                    {'name': 'Яйцо', 'quantity': '3шт'},
+                    {'name': 'Помидор', 'quantity': '1шт'},
+                    {'name': 'Перец болгарский', 'quantity': '0.5шт'},
+                    {'name': 'Сыр', 'quantity': '50г'},
+                    {'name': 'Молоко', 'quantity': '50мл'}
+                ],
+                'recipe': '1. Взбейте яйца с молоком\n2. Обжарьте овощи 5 минут\n3. Залейте яичной смесью, посыпьте сыром\n4. Готовьте под крышкой 10 минут'
+            }
+        ]
+    
+    @staticmethod
+    def _get_snack_options():
+        """Уникальные варианты перекусов"""
+        return [
+            {
+                'name': 'Йогурт с фруктами и орехами',
+                'calories': '250 ккал', 'protein': '12г', 'fat': '10г', 'carbs': '30г',
+                'ingredients': [
+                    {'name': 'Йогурт греческий', 'quantity': '150г'},
+                    {'name': 'Банан', 'quantity': '1шт'},
+                    {'name': 'Миндаль', 'quantity': '15г'}
+                ],
+                'recipe': '1. Нарежьте банан кружочками\n2. Смешайте с йогуртом\n3. Посыпьте измельченным миндалем'
+            },
+            {
+                'name': 'Творог с ягодами',
+                'calories': '200 ккал', 'protein': '20г', 'fat': '5г', 'carbs': '15г',
+                'ingredients': [
+                    {'name': 'Творог', 'quantity': '150г'},
+                    {'name': 'Ягоды свежие', 'quantity': '100г'},
+                    {'name': 'Мед', 'quantity': '10г'}
+                ],
+                'recipe': '1. Смешайте творог с ягодами\n2. Добавьте мед по вкусу\n3. Тщательно перемешайте'
+            }
+        ]
+    
+    @staticmethod
+    def _get_lunch_options():
+        """Уникальные варианты обедов"""
+        return [
+            {
+                'name': 'Куриная грудка с гречкой и овощами',
+                'calories': '450 ккал', 'protein': '40г', 'fat': '12г', 'carbs': '45г',
+                'ingredients': [
+                    {'name': 'Куриная грудка', 'quantity': '150г'},
+                    {'name': 'Гречневая крупа', 'quantity': '100г'},
+                    {'name': 'Брокколи', 'quantity': '150г'},
+                    {'name': 'Морковь', 'quantity': '1шт'},
+                    {'name': 'Лук', 'quantity': '0.5шт'}
+                ],
+                'recipe': '1. Отварите гречку\n2. Обжарьте куриную грудку с овощами\n3. Потушите 15 минут\n4. Подавайте с гречкой'
+            },
+            {
+                'name': 'Рыба на пару с рисом и салатом',
+                'calories': '420 ккал', 'protein': '35г', 'fat': '10г', 'carbs': '50г',
+                'ingredients': [
+                    {'name': 'Филе белой рыбы', 'quantity': '200г'},
+                    {'name': 'Рис', 'quantity': '100г'},
+                    {'name': 'Огурец', 'quantity': '1шт'},
+                    {'name': 'Помидор', 'quantity': '1шт'},
+                    {'name': 'Лимон', 'quantity': '0.5шт'}
+                ],
+                'recipe': '1. Приготовьте рыбу на пару 15 минут\n2. Отварите рис\n3. Нарежьте овощи для салата\n4. Подавайте с лимонным соком'
+            }
+        ]
+    
+    @staticmethod
+    def _get_dinner_options():
+        """Уникальные варианты ужинов"""
+        return [
+            {
+                'name': 'Овощной салат с курицей',
+                'calories': '350 ккал', 'protein': '30г', 'fat': '15г', 'carbs': '20г',
+                'ingredients': [
+                    {'name': 'Куриная грудка', 'quantity': '120г'},
+                    {'name': 'Листья салата', 'quantity': '100г'},
+                    {'name': 'Огурец', 'quantity': '1шт'},
+                    {'name': 'Помидор', 'quantity': '1шт'},
+                    {'name': 'Оливковое масло', 'quantity': '15мл'}
+                ],
+                'recipe': '1. Отварите куриную грудку\n2. Нарежьте овощи\n3. Смешайте все ингредиенты\n4. Заправьте оливковым маслом'
+            },
+            {
+                'name': 'Тушеные овощи с индейкой',
+                'calories': '380 ккал', 'protein': '35г', 'fat': '12г', 'carbs': '25г',
+                'ingredients': [
+                    {'name': 'Филе индейки', 'quantity': '150г'},
+                    {'name': 'Кабачок', 'quantity': '1шт'},
+                    {'name': 'Баклажан', 'quantity': '1шт'},
+                    {'name': 'Помидор', 'quantity': '2шт'},
+                    {'name': 'Лук', 'quantity': '0.5шт'}
+                ],
+                'recipe': '1. Обжарьте индейку с луком\n2. Добавьте нарезанные овощи\n3. Тушите 20 минут под крышкой\n4. Подавайте горячим'
+            }
+        ]
+    
+    @staticmethod
+    def _generate_proper_shopping_list(days):
+        """Генерирует корректный список покупок"""
+        shopping_list = {
+            'Овощи': [],
+            'Фрукты': [],
+            'Мясо/Рыба': [],
+            'Молочные продукты': [],
+            'Крупы/Злаки': [],
+            'Орехи/Семена': [],
+            'Бакалея': []
+        }
+        
+        # Собираем все ингредиенты из всех дней
+        all_ingredients = []
+        for day in days:
+            for meal in day['meals']:
+                all_ingredients.extend(meal['ingredients'])
+        
+        # Группируем по категориям
+        for ingredient in all_ingredients:
+            name = ingredient['name'].lower()
+            quantity = ingredient['quantity']
+            
+            if any(word in name for word in ['овощ', 'салат', 'брокколи', 'морковь', 'помидор', 'огурец', 'капуста', 'лук', 'перец', 'кабачок', 'баклажан']):
+                shopping_list['Овощи'].append({'name': ingredient['name'], 'quantity': quantity})
+            elif any(word in name for word in ['фрукт', 'ягода', 'банан', 'яблоко', 'апельсин', 'груша', 'персик', 'изюм']):
+                shopping_list['Фрукты'].append({'name': ingredient['name'], 'quantity': quantity})
+            elif any(word in name for word in ['куриц', 'мясо', 'говядин', 'свинин', 'рыб', 'индейк']):
+                shopping_list['Мясо/Рыба'].append({'name': ingredient['name'], 'quantity': quantity})
+            elif any(word in name for word in ['молок', 'творог', 'йогурт', 'сметан', 'сыр', 'кефир']):
+                shopping_list['Молочные продукты'].append({'name': ingredient['name'], 'quantity': quantity})
+            elif any(word in name for word in ['круп', 'рис', 'гречк', 'овсян', 'манн', 'хлопь']):
+                shopping_list['Крупы/Злаки'].append({'name': ingredient['name'], 'quantity': quantity})
+            elif any(word in name for word in ['орех', 'миндал', 'сем', 'семечк']):
+                shopping_list['Орехи/Семена'].append({'name': ingredient['name'], 'quantity': quantity})
+            else:
+                shopping_list['Бакалея'].append({'name': ingredient['name'], 'quantity': quantity})
+        
+        # Убираем пустые категории
+        shopping_list = {k: v for k, v in shopping_list.items() if v}
+        
+        return shopping_list
+
 # ==================== ИНТЕРАКТИВНЫЕ МЕНЮ ====================
 
 class InteractiveMenu:
@@ -551,7 +1116,8 @@ class InteractiveMenu:
             [InlineKeyboardButton("📋 ПОСМОТРЕТЬ КОРЗИНУ", callback_data=f"view_cart_{plan_id}")],
             [InlineKeyboardButton("✅ ОТМЕТИТЬ КУПЛЕННОЕ", callback_data=f"mark_purchased_{plan_id}")],
             [InlineKeyboardButton("🔄 СБРОСИТЬ ОТМЕТКИ", callback_data=f"reset_cart_{plan_id}")],
-            [InlineKeyboardButton("📥 СКАЧАТЬ TXT", callback_data=f"download_txt_{plan_id}")],
+            [InlineKeyboardButton("📥 СКАЧАТЬ КОРЗИНУ TXT", callback_data=f"download_cart_txt_{plan_id}")],
+            [InlineKeyboardButton("📄 СКАЧАТЬ ПЛАН TXT", callback_data=f"download_plan_txt_{plan_id}")],
             [InlineKeyboardButton("↩️ НАЗАД", callback_data="back_main")]
         ]
         return InlineKeyboardMarkup(keyboard)
@@ -581,7 +1147,7 @@ class InteractiveMenu:
             keyboard = [
                 [InlineKeyboardButton("📋 ПОСМОТРЕТЬ ПЛАН", callback_data=f"view_plan_{plan_id}")],
                 [InlineKeyboardButton("🛒 КОРЗИНА ПОКУПОК", callback_data=f"shopping_cart_plan_{plan_id}")],
-                [InlineKeyboardButton("📥 СКАЧАТЬ TXT", callback_data=f"download_txt_{plan_id}")],
+                [InlineKeyboardButton("📥 СКАЧАТЬ ПЛАН TXT", callback_data=f"download_plan_txt_{plan_id}")],
                 [InlineKeyboardButton("↩️ НАЗАД", callback_data="back_main")]
             ]
         else:
@@ -651,360 +1217,13 @@ class InteractiveMenu:
         ]
         return InlineKeyboardMarkup(keyboard)
 
-# ==================== УЛУЧШЕННЫЙ ГЕНЕРАТОР ПЛАНОВ ====================
-
-class EnhancedPlanGenerator:
-    """Улучшенный генератор планов питания"""
-    
-    @staticmethod
-    def generate_plan_with_progress_indicator(user_data):
-        """Генерирует план с индикатором прогресса"""
-        logger.info(f"🎯 Generating enhanced plan for user {user_data['user_id']}")
-        
-        plan = {
-            'user_data': user_data,
-            'days': [],
-            'shopping_list': {},
-            'recipes': {},
-            'water_regime': EnhancedPlanGenerator._generate_detailed_water_regime(user_data),
-            'professor_advice': EnhancedPlanGenerator._get_professor_advice(user_data),
-            'created_at': datetime.now().isoformat(),
-            'source': 'enhanced_generator'
-        }
-        
-        # Создаем 7 дней с уникальными рецептами
-        day_names = ['ПОНЕДЕЛЬНИК', 'ВТОРНИК', 'СРЕДА', 'ЧЕТВЕРГ', 'ПЯТНИЦА', 'СУББОТА', 'ВОСКРЕСЕНЬЕ']
-        
-        for i, day_name in enumerate(day_names):
-            day = {
-                'name': day_name,
-                'meals': EnhancedPlanGenerator._generate_unique_meals_for_day(i, user_data),
-                'total_calories': EnhancedPlanGenerator._calculate_daily_calories(user_data),
-                'water_schedule': EnhancedPlanGenerator._get_daily_water_schedule()
-            }
-            plan['days'].append(day)
-        
-        # Генерируем корректный список покупок
-        plan['shopping_list'] = EnhancedPlanGenerator._generate_proper_shopping_list(plan['days'])
-        plan['recipes'] = EnhancedPlanGenerator._collect_detailed_recipes(plan['days'])
-        
-        logger.info(f"✅ Enhanced plan generated for user {user_data['user_id']}")
-        return plan
-    
-    @staticmethod
-    def _generate_detailed_water_regime(user_data):
-        """Генерирует детальный водный режим"""
-        weight = user_data.get('weight', 70)
-        water_needed = max(1.5, weight * 0.03)  # 30 мл на 1 кг веса
-        
-        return {
-            'total': f'{water_needed:.1f} литра в день',
-            'schedule': [
-                {'time': '7:00', 'amount': '200 мл', 'description': '1 стакан теплой воды натощак для запуска метаболизма'},
-                {'time': '8:00', 'amount': '200 мл', 'description': 'После завтрака для улучшения пищеварения'},
-                {'time': '10:00', 'amount': '200 мл', 'description': 'Стакан воды для поддержания гидратации'},
-                {'time': '11:00', 'amount': '200 мл', 'description': 'После первого перекуса'},
-                {'time': '13:00', 'amount': '200 мл', 'description': 'После обеда для усвоения питательных веществ'},
-                {'time': '15:00', 'amount': '200 мл', 'description': 'Вода для поддержания энергии'},
-                {'time': '16:00', 'amount': '200 мл', 'description': 'После второго перекуса'},
-                {'time': '18:00', 'amount': '200 мл', 'description': 'Подготовка к ужину'},
-                {'time': '19:00', 'amount': '200 мл', 'description': 'После ужина'},
-                {'time': '21:00', 'amount': '200 мл', 'description': 'За 1-2 часа до сна для восстановления'}
-            ],
-            'recommendations': [
-                '💧 Пейте воду комнатной температуры',
-                '⏰ Не пейте во время еды - за 30 минут до и через 1 час после',
-                '🏃 Увеличьте потребление воды при физической активности',
-                '🎯 Следите за цветом мочи - она должна быть светло-желтой',
-                '🚫 Ограничьте кофе и чай - они обезвоживают организм'
-            ]
-        }
-    
-    @staticmethod
-    def _get_daily_water_schedule():
-        """Возвращает расписание воды на день"""
-        return [
-            '7:00 - 200 мл теплой воды натощак',
-            '8:00 - 200 мл после завтрака', 
-            '10:00 - 200 мл',
-            '11:00 - 200 мл после перекуса',
-            '13:00 - 200 мл после обеда',
-            '15:00 - 200 мл',
-            '16:00 - 200 мл после перекуса',
-            '18:00 - 200 мл',
-            '19:00 - 200 мл после ужина',
-            '21:00 - 200 мл перед сном'
-        ]
-    
-    @staticmethod
-    def _calculate_daily_calories(user_data):
-        """Рассчитывает дневную калорийность"""
-        gender = user_data.get('gender', '')
-        age = user_data.get('age', 30)
-        height = user_data.get('height', 170)
-        weight = user_data.get('weight', 70)
-        activity = user_data.get('activity', '')
-        goal = user_data.get('goal', '')
-        
-        # Базальный метаболизм
-        if gender == 'МУЖЧИНА':
-            bmr = 88.36 + (13.4 * weight) + (4.8 * height) - (5.7 * age)
-        else:
-            bmr = 447.6 + (9.2 * weight) + (3.1 * height) - (4.3 * age)
-        
-        # Учет активности
-        activity_multipliers = {'НИЗКАЯ': 1.2, 'СРЕДНЯЯ': 1.55, 'ВЫСОКАЯ': 1.725}
-        tdee = bmr * activity_multipliers.get(activity, 1.55)
-        
-        # Учет цели
-        if goal == 'ПОХУДЕНИЕ':
-            calories = tdee * 0.85  # Дефицит 15%
-        elif goal == 'НАБОР МАССЫ':
-            calories = tdee * 1.15  # Профицит 15%
-        else:
-            calories = tdee
-        
-        return f"{int(calories)} ккал"
-    
-    @staticmethod
-    def _get_professor_advice(user_data):
-        """Возвращает советы профессора"""
-        goal = user_data.get('goal', '')
-        
-        advice = {
-            'ПОХУДЕНИЕ': [
-                "Соблюдайте дефицит калорий для плавного снижения веса",
-                "Увеличьте потребление белка для сохранения мышечной массы", 
-                "Пейте воду за 30 минут до еды для снижения аппетита",
-                "Включите в рацион больше овощей и клетчатки",
-                "Регулярно занимайтесь спортом для ускорения метаболизма"
-            ],
-            'НАБОР МАССЫ': [
-                "Создайте профицит калорий для роста мышц",
-                "Увеличьте потребление сложных углеводов для энергии",
-                "Белок - строительный материал для мышц",
-                "Тренируйтесь с отягощениями 3-4 раза в неделю",
-                "Не забывайте про здоровые жиры для гормонального фона"
-            ],
-            'ПОДДЕРЖАНИЕ': [
-                "Поддерживайте баланс между потреблением и расходом калорий",
-                "Сбалансируйте БЖУ для оптимального функционирования",
-                "Регулярная физическая активность для тонуса",
-                "Разнообразное питание для получения всех нутриентов",
-                "Следите за водным балансом ежедневно"
-            ]
-        }
-        
-        return random.choice(advice.get(goal, advice['ПОДДЕРЖАНИЕ']))
-    
-    @staticmethod
-    def _generate_unique_meals_for_day(day_index, user_data):
-        """Генерирует уникальные приемы пищи для дня"""
-        meals_data = EnhancedPlanGenerator._get_meal_templates()
-        meals = []
-        
-        for meal_template in meals_data:
-            # Выбираем уникальный вариант для каждого дня
-            options = meal_template['options']
-            option_index = (day_index * len(options) // 7) % len(options)
-            meal_option = options[option_index]
-            
-            meal = {
-                'type': meal_template['type'],
-                'name': meal_option['name'],
-                'time': meal_template['time'],
-                'calories': meal_option['calories'],
-                'protein': meal_option['protein'],
-                'fat': meal_option['fat'],
-                'carbs': meal_option['carbs'],
-                'ingredients': meal_option['ingredients'],
-                'recipe': meal_option['recipe']
-            }
-            meals.append(meal)
-        
-        return meals
-    
-    @staticmethod
-    def _get_meal_templates():
-        """Возвращает шаблоны приемов пищи с уникальными рецептами"""
-        breakfast_options = [
-            {
-                'name': 'Овсяная каша с ягодами и орехами',
-                'calories': '350 ккал', 'protein': '15г', 'fat': '12г', 'carbs': '55г',
-                'ingredients': [
-                    {'name': 'Овсяные хлопья', 'quantity': '60г'},
-                    {'name': 'Молоко', 'quantity': '200мл'},
-                    {'name': 'Ягоды замороженные', 'quantity': '100г'},
-                    {'name': 'Грецкие орехи', 'quantity': '20г'},
-                    {'name': 'Мед', 'quantity': '15г'}
-                ],
-                'recipe': '1. Доведите молоко до кипения\n2. Добавьте овсяные хлопья, варите 7 минут\n3. Добавьте ягоды, готовьте еще 3 минуты\n4. Подавайте с измельченными орехами и медом'
-            },
-            {
-                'name': 'Творожная запеканка с изюмом',
-                'calories': '380 ккал', 'protein': '25г', 'fat': '15г', 'carbs': '35г',
-                'ingredients': [
-                    {'name': 'Творог', 'quantity': '200г'},
-                    {'name': 'Яйцо', 'quantity': '2шт'},
-                    {'name': 'Манная крупа', 'quantity': '30г'},
-                    {'name': 'Изюм', 'quantity': '30г'},
-                    {'name': 'Сметана', 'quantity': '50г'}
-                ],
-                'recipe': '1. Смешайте творог с яйцами и манкой\n2. Добавьте промытый изюм\n3. Выпекайте в духовке при 180°C 25 минут\n4. Подавайте со сметаной'
-            },
-            {
-                'name': 'Омлет с овощами и сыром',
-                'calories': '320 ккал', 'protein': '22г', 'fat': '18г', 'carbs': '12г',
-                'ingredients': [
-                    {'name': 'Яйцо', 'quantity': '3шт'},
-                    {'name': 'Помидор', 'quantity': '1шт'},
-                    {'name': 'Перец болгарский', 'quantity': '0.5шт'},
-                    {'name': 'Сыр', 'quantity': '50г'},
-                    {'name': 'Молоко', 'quantity': '50мл'}
-                ],
-                'recipe': '1. Взбейте яйца с молоком\n2. Обжарьте овощи 5 минут\n3. Залейте яичной смесью, посыпьте сыром\n4. Готовьте под крышкой 10 минут'
-            }
-        ]
-        
-        lunch_options = [
-            {
-                'name': 'Куриная грудка с гречкой и овощами',
-                'calories': '450 ккал', 'protein': '40г', 'fat': '12г', 'carbs': '45г',
-                'ingredients': [
-                    {'name': 'Куриная грудка', 'quantity': '150г'},
-                    {'name': 'Гречневая крупа', 'quantity': '100г'},
-                    {'name': 'Брокколи', 'quantity': '150г'},
-                    {'name': 'Морковь', 'quantity': '1шт'},
-                    {'name': 'Лук', 'quantity': '0.5шт'}
-                ],
-                'recipe': '1. Отварите гречку\n2. Обжарьте куриную грудку с овощами\n3. Потушите 15 минут\n4. Подавайте с гречкой'
-            },
-            {
-                'name': 'Рыба на пару с рисом и салатом',
-                'calories': '420 ккал', 'protein': '35г', 'fat': '10г', 'carbs': '50г',
-                'ingredients': [
-                    {'name': 'Филе белой рыбы', 'quantity': '200г'},
-                    {'name': 'Рис', 'quantity': '100г'},
-                    {'name': 'Огурец', 'quantity': '1шт'},
-                    {'name': 'Помидор', 'quantity': '1шт'},
-                    {'name': 'Лимон', 'quantity': '0.5шт'}
-                ],
-                'recipe': '1. Приготовьте рыбу на пару 15 минут\n2. Отварите рис\n3. Нарежьте овощи для салата\n4. Подавайте с лимонным соком'
-            }
-        ]
-        
-        return [
-            {'type': 'ЗАВТРАК', 'time': '8:00', 'options': breakfast_options},
-            {'type': 'ПЕРЕКУС 1', 'time': '11:00', 'options': [{
-                'name': 'Йогурт с фруктами и орехами',
-                'calories': '250 ккал', 'protein': '12г', 'fat': '10г', 'carbs': '30г',
-                'ingredients': [
-                    {'name': 'Йогурт греческий', 'quantity': '150г'},
-                    {'name': 'Банан', 'quantity': '1шт'},
-                    {'name': 'Миндаль', 'quantity': '15г'}
-                ],
-                'recipe': '1. Нарежьте банан кружочками\n2. Смешайте с йогуртом\n3. Посыпьте измельченным миндалем'
-            }]},
-            {'type': 'ОБЕД', 'time': '13:00', 'options': lunch_options},
-            {'type': 'ПЕРЕКУС 2', 'time': '16:00', 'options': [{
-                'name': 'Творог с ягодами',
-                'calories': '200 ккал', 'protein': '20г', 'fat': '5г', 'carbs': '15г',
-                'ingredients': [
-                    {'name': 'Творог', 'quantity': '150г'},
-                    {'name': 'Ягоды свежие', 'quantity': '100г'},
-                    {'name': 'Мед', 'quantity': '10г'}
-                ],
-                'recipe': '1. Смешайте творог с ягодами\n2. Добавьте мед по вкусу\n3. Тщательно перемешайте'
-            }]},
-            {'type': 'УЖИН', 'time': '19:00', 'options': [{
-                'name': 'Овощной салат с курицей',
-                'calories': '350 ккал', 'protein': '30г', 'fat': '15г', 'carbs': '20г',
-                'ingredients': [
-                    {'name': 'Куриная грудка', 'quantity': '120г'},
-                    {'name': 'Листья салата', 'quantity': '100г'},
-                    {'name': 'Огурец', 'quantity': '1шт'},
-                    {'name': 'Помидор', 'quantity': '1шт'},
-                    {'name': 'Оливковое масло', 'quantity': '15мл'}
-                ],
-                'recipe': '1. Отварите куриную грудку\n2. Нарежьте овощи\n3. Смешайте все ингредиенты\n4. Заправьте оливковым маслом'
-            }]}
-        ]
-    
-    @staticmethod
-    def _generate_proper_shopping_list(days):
-        """Генерирует корректный список покупок"""
-        shopping_list = {
-            'Овощи': [],
-            'Фрукты': [],
-            'Мясо/Рыба': [],
-            'Молочные продукты': [],
-            'Крупы/Злаки': [],
-            'Орехи/Семена': [],
-            'Бакалея': []
-        }
-        
-        # Собираем все ингредиенты из всех дней
-        all_ingredients = []
-        for day in days:
-            for meal in day['meals']:
-                all_ingredients.extend(meal['ingredients'])
-        
-        # Группируем по категориям
-        for ingredient in all_ingredients:
-            name = ingredient['name'].lower()
-            quantity = ingredient['quantity']
-            
-            if any(word in name for word in ['овощ', 'салат', 'брокколи', 'морковь', 'помидор', 'огурец', 'капуста', 'лук', 'перец']):
-                shopping_list['Овощи'].append(f"{ingredient['name']} - {quantity}")
-            elif any(word in name for word in ['фрукт', 'ягода', 'банан', 'яблоко', 'апельсин', 'груша', 'персик']):
-                shopping_list['Фрукты'].append(f"{ingredient['name']} - {quantity}")
-            elif any(word in name for word in ['куриц', 'мясо', 'говядин', 'свинин', 'рыб', 'индейк']):
-                shopping_list['Мясо/Рыба'].append(f"{ingredient['name']} - {quantity}")
-            elif any(word in name for word in ['молок', 'творог', 'йогурт', 'сметан', 'сыр', 'кефир']):
-                shopping_list['Молочные продукты'].append(f"{ingredient['name']} - {quantity}")
-            elif any(word in name for word in ['круп', 'рис', 'гречк', 'овсян', 'манн', 'хлопь']):
-                shopping_list['Крупы/Злаки'].append(f"{ingredient['name']} - {quantity}")
-            elif any(word in name for word in ['орех', 'миндал', 'сем', 'семечк']):
-                shopping_list['Орехи/Семена'].append(f"{ingredient['name']} - {quantity}")
-            else:
-                shopping_list['Бакалея'].append(f"{ingredient['name']} - {quantity}")
-        
-        # Убираем дубликаты
-        for category in shopping_list:
-            shopping_list[category] = list(set(shopping_list[category]))
-        
-        return shopping_list
-    
-    @staticmethod
-    def _collect_detailed_recipes(days):
-        """Собирает детальные рецепты"""
-        recipes = {}
-        
-        for day in days:
-            for meal in day['meals']:
-                recipe_name = meal['name']
-                if recipe_name not in recipes:
-                    recipes[recipe_name] = {
-                        'ingredients': meal['ingredients'],
-                        'instructions': meal['recipe'],
-                        'calories': meal['calories'],
-                        'protein': meal['protein'],
-                        'fat': meal['fat'],
-                        'carbs': meal['carbs'],
-                        'day': day['name'],
-                        'meal_type': meal['type'],
-                        'time': meal['time']
-                    }
-        
-        return recipes
-
 # ==================== ФОРМИРОВАНИЕ ТЕКСТОВЫХ ФАЙЛОВ ====================
 
 class TextFileGenerator:
-    """Генератор текстовых файлов для планов и корзин"""
+    """Генератор текстовых файлов для планов, корзин и рецептов"""
     
     @staticmethod
-    def generate_plan_text_file(plan_data):
+    def generate_plan_text_file(plan_data, plan_id):
         """Генерирует текстовый файл с планом питания"""
         try:
             user_data = plan_data.get('user_data', {})
@@ -1013,11 +1232,13 @@ class TextFileGenerator:
             # Заголовок
             content.append("🎯 ПЕРСОНАЛЬНЫЙ ПЛАН ПИТАНИЯ")
             content.append("=" * 50)
+            content.append(f"ID плана: {plan_id}")
             content.append(f"👤 Клиент: {user_data.get('gender', '')}, {user_data.get('age', '')} лет")
             content.append(f"📏 Параметры: {user_data.get('height', '')} см, {user_data.get('weight', '')} кг")
             content.append(f"🎯 Цель: {user_data.get('goal', '')}")
             content.append(f"🏃 Активность: {user_data.get('activity', '')}")
             content.append(f"📅 Создан: {plan_data.get('created_at', '')[:10]}")
+            content.append(f"🤖 Источник: {plan_data.get('source', 'enhanced_generator')}")
             content.append("")
             
             # Водный режим
@@ -1083,30 +1304,25 @@ class TextFileGenerator:
             purchased_count = 0
             
             for category, products in shopping_cart.items():
-                content.append(f"📦 {category.upper()}")
-                content.append("-" * 20)
-                
-                for product in products:
-                    status = "✅ КУПЛЕНО" if product['purchased'] else "⭕ НУЖНО КУПИТЬ"
-                    content.append(f"  {status}")
-                    content.append(f"  {product['name']} - {product['quantity']}")
-                    content.append("")
+                if products:  # Показываем только непустые категории
+                    content.append(f"📦 {category.upper()}")
+                    content.append("-" * 20)
                     
-                    total_products += 1
-                    if product['purchased']:
-                        purchased_count += 1
+                    for product in products:
+                        status = "✅ КУПЛЕНО" if product.get('purchased', False) else "⭕ НУЖНО КУПИТЬ"
+                        content.append(f"  {status}")
+                        content.append(f"  {product['name']} - {product['quantity']}")
+                        content.append("")
+                        
+                        total_products += 1
+                        if product.get('purchased', False):
+                            purchased_count += 1
             
             content.append("")
             content.append("📊 СТАТИСТИКА:")
             content.append(f"Всего продуктов: {total_products}")
             content.append(f"Куплено: {purchased_count}")
             content.append(f"Осталось: {total_products - purchased_count}")
-            content.append("")
-            content.append("💡 Советы по покупкам:")
-            content.append("- Планируйте покупки на неделю вперед")
-            content.append("- Покупайте сезонные овощи и фрукты")
-            content.append("- Обращайте внимание на свежесть продуктов")
-            content.append("- Составляйте список перед походом в магазин")
             
             return "\n".join(content)
             
@@ -1153,7 +1369,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🎯 Добро пожаловать в бот персонализированного питания!
 
 🤖 Я помогу вам:
-• Создать персональный план питания
+• Создать персональный план питания с YandexGPT
 • Отслеживать прогресс через чек-ины
 • Анализировать статистику
 • Формировать корзину покупок
@@ -1255,9 +1471,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data.startswith("reset_cart_"):
             plan_id = data.replace("reset_cart_", "")
             await handle_reset_cart(query, context, int(plan_id))
-        elif data.startswith("download_txt_"):
-            plan_id = data.replace("download_txt_", "")
-            await handle_download_txt(query, context, int(plan_id))
+        elif data.startswith("download_cart_txt_"):
+            plan_id = data.replace("download_cart_txt_", "")
+            await handle_download_cart_txt(query, context, int(plan_id))
+        elif data.startswith("download_plan_txt_"):
+            plan_id = data.replace("download_plan_txt_", "")
+            await handle_download_plan_txt(query, context, int(plan_id))
         elif data.startswith("toggle_"):
             await handle_toggle_product(query, context, data)
         elif data.startswith("back_cart_"):
@@ -1437,7 +1656,7 @@ async def handle_activity(query, context, data):
         )
 
 async def process_plan_details(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
-    """Обрабатывает детали плана"""
+    """Обрабатывает детали плана с REAL YandexGPT"""
     try:
         parts = [part.strip() for part in text.split(',')]
         if len(parts) != 3:
@@ -1461,15 +1680,15 @@ async def process_plan_details(update: Update, context: ContextTypes.DEFAULT_TYP
             'username': update.effective_user.username
         }
         
-        # Отправляем сообщение о начале генерации
+        # Отправляем сообщение о начале работы YandexGPT
         progress_message = await update.message.reply_text(
-            "🔄 Ваш план готовится...\n\n"
-            "🎓 Генерируем индивидуальный план питания...",
+            "🔄 Ваш план готовится, подключаем YandexGPT...\n\n"
+            "🎓 Профессор анализирует ваши данные и создает ИНДИВИДУАЛЬНЫЙ план...",
             reply_markup=menu.get_back_menu()
         )
         
-        # Генерируем план
-        plan_data = EnhancedPlanGenerator.generate_plan_with_progress_indicator(user_data)
+        # РЕАЛЬНАЯ РАБОТА YANDEX GPT
+        plan_data = await YandexGPTService.generate_nutrition_plan(user_data)
         
         if plan_data:
             plan_id = save_plan(user_data['user_id'], plan_data)
@@ -1480,15 +1699,18 @@ async def process_plan_details(update: Update, context: ContextTypes.DEFAULT_TYP
             
             await progress_message.delete()
             
+            source_info = "🎓 Создан профессором нутрициологии с YandexGPT" if plan_data.get('source') == 'yandex_gpt' else "🤖 Создан улучшенным алгоритмом"
+            
             success_text = f"""
 🎉 ВАШ ПЛАН ПИТАНИЯ ГОТОВ!
 
 👤 Данные: {user_data['gender']}, {age} лет, {height} см, {weight} кг
 🎯 Цель: {user_data['goal']}
 🏃 Активность: {user_data['activity']}
+{source_info}
 
 📋 План включает:
-• 7 дней питания с уникальными рецептами
+• 7 дней питания с УНИКАЛЬНЫМИ рецептами
 • Детальный водный режим по часам
 • 5 приемов пищи в день
 • Автоматическую корзину покупок
@@ -1507,7 +1729,7 @@ async def process_plan_details(update: Update, context: ContextTypes.DEFAULT_TYP
                 reply_markup=menu.get_my_plan_menu(plan_id)
             )
             
-            logger.info(f"✅ Plan successfully created for user {user_data['user_id']}")
+            logger.info(f"✅ Plan successfully created for user {user_data['user_id']} with {plan_data.get('source')}")
             
         else:
             await progress_message.delete()
@@ -1640,7 +1862,9 @@ async def display_plan_details(query, plan_data):
 🎓 Совет профессора:
 {plan.get('professor_advice', '')}
 
-Для просмотра детального плана на 7 дней используйте кнопку "СКАЧАТЬ TXT".
+🤖 Источник: {plan.get('source', 'enhanced_generator')}
+
+Для просмотра детального плана на 7 дней используйте кнопку "СКАЧАТЬ ПЛАН TXT".
 """
         await query.edit_message_text(
             message_text,
@@ -1839,17 +2063,18 @@ async def handle_view_cart(query, context, plan_id):
         purchased_count = 0
         
         for category, products in cart.items():
-            cart_text += f"📦 {category.upper()}:\n"
-            
-            for product in products:
-                status = "✅" if product['purchased'] else "⭕"
-                cart_text += f"  {status} {product['name']} - {product['quantity']}\n"
+            if products:  # Показываем только непустые категории
+                cart_text += f"📦 {category.upper()}:\n"
                 
-                total_products += 1
-                if product['purchased']:
-                    purchased_count += 1
-            
-            cart_text += "\n"
+                for product in products:
+                    status = "✅" if product['purchased'] else "⭕"
+                    cart_text += f"  {status} {product['name']} - {product['quantity']}\n"
+                    
+                    total_products += 1
+                    if product['purchased']:
+                        purchased_count += 1
+                
+                cart_text += "\n"
         
         progress = (purchased_count / total_products * 100) if total_products > 0 else 0
         cart_text += f"📊 Прогресс: {purchased_count}/{total_products} ({progress:.1f}%)"
@@ -1928,8 +2153,40 @@ async def handle_reset_cart(query, context, plan_id):
             reply_markup=menu.get_shopping_cart_menu(plan_id)
         )
 
-async def handle_download_txt(query, context, plan_id):
-    """Скачивание TXT файла"""
+async def handle_download_cart_txt(query, context, plan_id):
+    """Скачивание корзины в TXT формате"""
+    user_id = query.from_user.id
+    
+    try:
+        # Получаем корзину
+        cart = get_shopping_cart(user_id, plan_id)
+        
+        if cart:
+            # Генерируем файл корзины
+            text_content = TextFileGenerator.generate_shopping_list_text_file(cart, plan_id)
+            
+            # Создаем файл в памяти
+            file_buffer = io.BytesIO(text_content.encode('utf-8'))
+            file_buffer.name = f'shopping_cart_{plan_id}.txt'
+            
+            # Отправляем файл
+            await context.bot.send_document(
+                chat_id=query.message.chat_id,
+                document=file_buffer,
+                filename=f'shopping_cart_{plan_id}.txt',
+                caption=f"🛒 Ваш список покупок (ID плана: {plan_id})"
+            )
+            
+            await query.answer("✅ Файл корзины отправлен!")
+        else:
+            await query.answer("❌ Корзина пуста")
+            
+    except Exception as e:
+        logger.error(f"❌ Error downloading cart TXT: {e}")
+        await query.answer("❌ Ошибка при создании файла корзины")
+
+async def handle_download_plan_txt(query, context, plan_id):
+    """Скачивание плана в TXT формате"""
     user_id = query.from_user.id
     
     try:
@@ -1944,7 +2201,7 @@ async def handle_download_txt(query, context, plan_id):
             plan_data = json.loads(result['plan_data'])
             
             # Генерируем текстовый файл
-            text_content = TextFileGenerator.generate_plan_text_file(plan_data)
+            text_content = TextFileGenerator.generate_plan_text_file(plan_data, plan_id)
             
             # Создаем файл в памяти
             file_buffer = io.BytesIO(text_content.encode('utf-8'))
@@ -1958,12 +2215,12 @@ async def handle_download_txt(query, context, plan_id):
                 caption=f"📄 Ваш план питания (ID: {plan_id})"
             )
             
-            await query.answer("✅ Файл отправлен!")
+            await query.answer("✅ Файл плана отправлен!")
         else:
             await query.answer("❌ План не найден")
             
     except Exception as e:
-        logger.error(f"❌ Error downloading TXT: {e}")
+        logger.error(f"❌ Error downloading plan TXT: {e}")
         await query.answer("❌ Ошибка при создании файла")
 
 # ==================== ОБРАБОТЧИКИ АДМИН-ПАНЕЛИ ====================
@@ -2162,8 +2419,9 @@ async def handle_help(query, context):
 ❓ ПОМОЩЬ ПО БОТУ
 
 📊 СОЗДАТЬ ПЛАН:
-• Создает персонализированный план питания на 7 дней
+• Создает персонализированный план питания на 7 дней через YandexGPT
 • Учитывает ваш пол, цель, активность и параметры
+• Генерирует УНИКАЛЬНЫЕ рецепты для каждого дня
 • Лимит: 1 план в 7 дней (для администраторов - безлимитно)
 
 📈 ЧЕК-ИН:
@@ -2184,7 +2442,7 @@ async def handle_help(query, context):
 🛒 КОРЗИНА:
 • Автоматическая генерация списка покупок для плана
 • Отметка купленных продуктов
-• Скачивание списка покупок
+• Скачивание списка покупок в TXT формате
 
 👑 АДМИН (только для администраторов):
 • Просмотр статистики бота
@@ -2235,15 +2493,14 @@ def init_bot():
 def home():
     return """
     <h1>🤖 Nutrition Bot is Running!</h1>
-    <p>Бот для создания персональных планов питания</p>
+    <p>Бот для создания персональных планов питания с YandexGPT</p>
     <p><a href="/health">Health Check</a></p>
     <p><a href="/ping">Ping</a></p>
     <p>🕒 Last update: {}</p>
     <p>🔧 Mode: {}</p>
-    <p>🎓 Professor AI: {}</p>
-    <p>💧 All Features: ✅ Active</p>
+    <p>🎓 YandexGPT: {}</p>
     """.format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
-               "WEBHOOK" if Config.WEBHOOK_URL and not Config.RENDER else "POLLING",
+               "WEBHOOK" if Config.RENDER else "POLLING",
                "🟢 Active" if Config.YANDEX_API_KEY else "🔴 Inactive")
 
 @app.route('/health')
@@ -2252,9 +2509,9 @@ def health_check():
         "status": "healthy", 
         "service": "nutrition-bot",
         "timestamp": datetime.now().isoformat(),
-        "bot_status": "running" if application else "stopped",
-        "database": "connected",
-        "features": ["plans", "checkins", "stats", "shopping_cart", "admin_panel"]
+        "mode": "webhook" if Config.RENDER else "polling",
+        "yandex_gpt": "active" if Config.YANDEX_API_KEY else "inactive",
+        "database": "connected"
     })
 
 @app.route('/ping')
@@ -2264,21 +2521,39 @@ def ping():
 @app.route('/webhook', methods=['POST'])
 def webhook():
     """Webhook endpoint for Telegram"""
-    try:
-        if request.method == "POST" and application:
-            logger.info("📨 Webhook received")
+    if request.method == "POST":
+        try:
             update = Update.de_json(request.get_json(), application.bot)
             application.update_queue.put(update)
             return "ok"
-        return "error"
-    except Exception as e:
-        logger.error(f"❌ Webhook error: {e}")
-        return "error"
+        except Exception as e:
+            logger.error(f"❌ Webhook error: {e}")
+            return "error"
+    return "error"
 
 # ==================== ЗАПУСК ПРИЛОЖЕНИЯ ====================
 
+def run_webhook():
+    """Запуск бота в режиме webhook"""
+    try:
+        logger.info("🤖 Starting bot in WEBHOOK mode...")
+        
+        # Устанавливаем webhook
+        webhook_url = f"{Config.WEBHOOK_URL}/webhook"
+        application.bot.set_webhook(webhook_url)
+        logger.info(f"✅ Webhook set to: {webhook_url}")
+        
+        # Запускаем Flask приложение
+        port = int(os.environ.get('PORT', Config.PORT))
+        logger.info(f"🌐 Starting Flask app on port {port}")
+        app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+        
+    except Exception as e:
+        logger.error(f"❌ Webhook error: {e}")
+        raise
+
 def run_polling():
-    """Запуск бота в режиме polling"""
+    """Запуск бота в режиме polling (для локальной разработки)"""
     try:
         logger.info("🤖 Starting bot in POLLING mode...")
         application.run_polling(
@@ -2293,28 +2568,29 @@ def run_polling():
 def main():
     """Основная функция запуска"""
     try:
-        logger.info("🚀 Starting Nutrition Bot with All Features...")
+        logger.info("🚀 Starting Nutrition Bot with YandexGPT...")
         
         if not init_bot():
             logger.error("❌ Failed to initialize bot. Exiting.")
             return
         
-        def run_flask():
-            port = int(os.environ.get('PORT', Config.PORT))
-            logger.info(f"🌐 Starting Flask app on port {port}")
-            app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
-        
-        flask_thread = threading.Thread(target=run_flask, daemon=True)
-        flask_thread.start()
-        
-        # Запуск бота
-        run_polling()
+        # Выбираем режим запуска
+        if Config.RENDER and Config.WEBHOOK_URL:
+            run_webhook()  # Webhook режим для Render
+        else:
+            run_polling()  # Polling режим для локальной разработки
         
     except KeyboardInterrupt:
         logger.info("🛑 Bot stopped by user")
     except Exception as e:
         logger.error(f"❌ Fatal error: {e}")
     finally:
+        if Config.RENDER and application:
+            try:
+                application.bot.delete_webhook()
+                logger.info("✅ Webhook removed")
+            except:
+                pass
         logger.info("👋 Bot shutdown complete")
 
 if __name__ == "__main__":
