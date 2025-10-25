@@ -1193,47 +1193,7 @@ application = None
 menu = InteractiveMenu()
 keep_alive_service = KeepAliveService()
 
-def init_bot():
-    """Инициализация бота"""
-    global application
-    try:
-        Config.validate()
-        init_database()
-        
-        application = Application.builder().token(Config.BOT_TOKEN).build()
-        
-        application.add_handler(CommandHandler("start", start_command))
-        application.add_handler(CommandHandler("menu", menu_command))
-        application.add_handler(CommandHandler("admin", admin_command))
-        application.add_handler(CallbackQueryHandler(handle_callback))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-        
-        application.add_error_handler(error_handler)
-        
-        logger.info("✅ Bot initialized successfully")
-        return True
-    except Exception as e:
-        logger.error(f"❌ Failed to initialize bot: {e}")
-        return False
-
-async def setup_webhook():
-    """Настройка webhook"""
-    try:
-        if Config.WEBHOOK_URL and not Config.RENDER:
-            webhook_url = f"{Config.WEBHOOK_URL}/webhook"
-            await application.bot.set_webhook(webhook_url)
-            logger.info(f"✅ Webhook set: {webhook_url}")
-            return True
-        else:
-            logger.info("ℹ️ Using polling mode (Render detected)")
-            return False
-    except Exception as e:
-        logger.error(f"❌ Webhook setup failed: {e}")
-        return False
-
-# Обработчики команд (остаются без изменений, как в предыдущей версии)
-# [Здесь должны быть все обработчики команд из предыдущей версии]
-# Для экономии места не дублирую их, так как они не изменились
+# ==================== ОСНОВНЫЕ ОБРАБОТЧИКИ КОМАНД ====================
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start"""
@@ -1271,7 +1231,751 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"❌ Error in start_command: {e}")
         await update.message.reply_text("❌ Произошла ошибка. Попробуйте позже.")
 
-# [Остальные обработчики остаются без изменений]
+async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает главное меню"""
+    await update.message.reply_text(
+        "🤖 ГЛАВНОЕ МЕНЮ\n\nВыберите действие:",
+        reply_markup=menu.get_main_menu()
+    )
+
+async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда администратора"""
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("❌ У вас нет прав доступа")
+        return
+    
+    await update.message.reply_text(
+        "👑 ПАНЕЛЬ АДМИНИСТРАТОРА - Функции в разработке",
+        reply_markup=menu.get_main_menu()
+    )
+
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик callback'ов"""
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    logger.info(f"📨 Callback received: {data} from user {query.from_user.id}")
+    
+    try:
+        # Основные команды меню
+        if data == "create_plan":
+            await handle_create_plan(query, context)
+        elif data == "checkin":
+            await handle_checkin_menu(query, context)
+        elif data == "stats":
+            await handle_stats(query, context)
+        elif data == "my_plan":
+            await handle_my_plan_menu(query, context)
+        elif data == "shopping_cart":
+            await handle_shopping_cart_menu(query, context)
+        elif data == "help":
+            await handle_help(query, context)
+        elif data == "admin":
+            await handle_admin_callback(query, context)
+        
+        # Навигация назад
+        elif data == "back_main":
+            await show_main_menu(query)
+        elif data.startswith("back_gender"):
+            await handle_gender_back(query, context)
+        elif data.startswith("back_goal"):
+            await handle_goal_back(query, context)
+        
+        # Ввод данных плана
+        elif data.startswith("gender_"):
+            await handle_gender(query, context, data)
+        elif data.startswith("goal_"):
+            await handle_goal(query, context, data)
+        elif data.startswith("activity_"):
+            await handle_activity(query, context, data)
+        
+        # Чек-ин
+        elif data == "checkin_data":
+            await handle_checkin_data(query, context)
+        elif data == "checkin_history":
+            await handle_checkin_history(query, context)
+        
+        # Корзина покупок
+        elif data.startswith("view_cart_"):
+            plan_id = data.replace("view_cart_", "")
+            await handle_view_cart(query, context, int(plan_id))
+        elif data.startswith("mark_purchased_"):
+            plan_id = data.replace("mark_purchased_", "")
+            await handle_mark_purchased(query, context, int(plan_id))
+        elif data.startswith("reset_cart_"):
+            plan_id = data.replace("reset_cart_", "")
+            await handle_reset_cart(query, context, int(plan_id))
+        elif data.startswith("download_txt_"):
+            plan_id = data.replace("download_txt_", "")
+            await handle_download_txt(query, context, int(plan_id))
+        elif data.startswith("toggle_"):
+            await handle_toggle_product(query, context, data)
+        elif data.startswith("back_cart_"):
+            plan_id = data.replace("back_cart_", "")
+            await handle_shopping_cart_menu(query, context, int(plan_id))
+        
+        # Мой план
+        elif data.startswith("view_plan_"):
+            plan_id = data.replace("view_plan_", "")
+            await handle_view_plan(query, context, int(plan_id))
+        elif data.startswith("shopping_cart_plan_"):
+            plan_id = data.replace("shopping_cart_plan_", "")
+            await handle_shopping_cart_menu(query, context, int(plan_id))
+        
+        else:
+            logger.warning(f"⚠️ Unknown callback data: {data}")
+            await query.edit_message_text(
+                "❌ Неизвестная команда",
+                reply_markup=menu.get_main_menu()
+            )
+            
+    except Exception as e:
+        logger.error(f"❌ Error in callback handler: {e}")
+        await query.edit_message_text(
+            "❌ Произошла ошибка. Попробуйте снова.",
+            reply_markup=menu.get_main_menu()
+        )
+
+async def handle_admin_callback(query, context):
+    """Обработчик админских callback'ов"""
+    user_id = query.from_user.id
+    if not is_admin(user_id):
+        await query.edit_message_text("❌ У вас нет прав доступа")
+        return
+    
+    await admin_command(await _get_update_from_query(query), context)
+
+async def _get_update_from_query(query):
+    """Создает Update объект из query"""
+    return Update(update_id=query.id, callback_query=query)
+
+# ==================== ОБРАБОТЧИКИ ПЛАНА ПИТАНИЯ ====================
+
+async def handle_create_plan(query, context):
+    """Обработчик создания плана"""
+    try:
+        user_id = query.from_user.id
+        
+        if not is_admin(user_id) and not can_make_request(user_id):
+            days_remaining = get_days_until_next_plan(user_id)
+            await query.edit_message_text(
+                f"⏳ Вы уже запрашивали план питания\nСледующий доступен через {days_remaining} дней",
+                reply_markup=menu.get_main_menu()
+            )
+            return
+        
+        context.user_data['plan_data'] = {}
+        context.user_data['plan_step'] = 1
+        
+        await query.edit_message_text(
+            "📊 СОЗДАНИЕ ПЛАНА ПИТАНИЯ\n\n1️⃣ Выберите ваш пол:",
+            reply_markup=menu.get_plan_data_input(step=1)
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ Error in create plan handler: {e}")
+        await query.edit_message_text(
+            "❌ Ошибка при создании плана. Попробуйте снова.",
+            reply_markup=menu.get_main_menu()
+        )
+
+async def handle_gender_back(query, context):
+    """Назад к выбору пола"""
+    try:
+        context.user_data['plan_step'] = 1
+        
+        await query.edit_message_text(
+            "📊 СОЗДАНИЕ ПЛАНА ПИТАНИЯ\n\n1️⃣ Выберите ваш пол:",
+            reply_markup=menu.get_plan_data_input(step=1)
+        )
+    except Exception as e:
+        logger.error(f"❌ Error in gender back handler: {e}")
+        await query.edit_message_text(
+            "❌ Ошибка навигации. Попробуйте с начала.",
+            reply_markup=menu.get_main_menu()
+        )
+
+async def handle_goal_back(query, context):
+    """Назад к выбору цели"""
+    try:
+        context.user_data['plan_step'] = 2
+        
+        await query.edit_message_text(
+            "📊 СОЗДАНИЕ ПЛАНА ПИТАНИЯ\n\n2️⃣ Выберите вашу цель:",
+            reply_markup=menu.get_plan_data_input(step=2)
+        )
+    except Exception as e:
+        logger.error(f"❌ Error in goal back handler: {e}")
+        await query.edit_message_text(
+            "❌ Ошибка навигации. Попробуйте с начала.",
+            reply_markup=menu.get_main_menu()
+        )
+
+async def handle_gender(query, context, data):
+    """Обработчик выбора пола"""
+    try:
+        gender_map = {
+            "gender_male": "МУЖЧИНА",
+            "gender_female": "ЖЕНЩИНА"
+        }
+        
+        context.user_data['plan_data']['gender'] = gender_map[data]
+        context.user_data['plan_step'] = 2
+        
+        await query.edit_message_text(
+            "📊 СОЗДАНИЕ ПЛАНА ПИТАНИЯ\n\n2️⃣ Выберите вашу цель:",
+            reply_markup=menu.get_plan_data_input(step=2)
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ Error in gender handler: {e}")
+        await query.edit_message_text(
+            "❌ Ошибка при выборе пола. Попробуйте снова.",
+            reply_markup=menu.get_main_menu()
+        )
+
+async def handle_goal(query, context, data):
+    """Обработчик выбора цели"""
+    try:
+        goal_map = {
+            "goal_weight_loss": "ПОХУДЕНИЕ",
+            "goal_mass": "НАБОР МАССЫ", 
+            "goal_maintain": "ПОДДЕРЖАНИЕ"
+        }
+        
+        context.user_data['plan_data']['goal'] = goal_map[data]
+        context.user_data['plan_step'] = 3
+        
+        await query.edit_message_text(
+            "📊 СОЗДАНИЕ ПЛАНА ПИТАНИЯ\n\n3️⃣ Выберите уровень активности:",
+            reply_markup=menu.get_plan_data_input(step=3)
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ Error in goal handler: {e}")
+        await query.edit_message_text(
+            "❌ Ошибка при выборе цели. Попробуйте снова.",
+            reply_markup=menu.get_main_menu()
+        )
+
+async def handle_activity(query, context, data):
+    """Обработчик выбора активности"""
+    try:
+        activity_map = {
+            "activity_high": "ВЫСОКАЯ",
+            "activity_medium": "СРЕДНЯЯ",
+            "activity_low": "НИЗКАЯ"
+        }
+        
+        context.user_data['plan_data']['activity'] = activity_map[data]
+        context.user_data['awaiting_input'] = 'plan_details'
+        
+        await query.edit_message_text(
+            "📊 СОЗДАНИЕ ПЛАНА ПИТАНИЯ\n\n4️⃣ Введите ваши данные в формате:\n"
+            "Возраст, Рост (см), Вес (кг)\n\n"
+            "Пример: 30, 180, 75\n\n"
+            "Для отмены нажмите /menu",
+            reply_markup=menu.get_back_menu()
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ Error in activity handler: {e}")
+        await query.edit_message_text(
+            "❌ Ошибка при выборе активности. Попробуйте снова.",
+            reply_markup=menu.get_main_menu()
+        )
+
+# ==================== ОБРАБОТЧИКИ ЧЕК-ИНА ====================
+
+async def handle_checkin_menu(query, context):
+    """Обработчик меню чек-ина"""
+    try:
+        await query.edit_message_text(
+            "📈 ЕЖЕДНЕВНЫЙ ЧЕК-ИН\n\n"
+            "Отслеживайте ваш прогресс:\n"
+            "• Вес\n"
+            "• Обхват талии\n"
+            "• Самочувствие (1-5)\n"
+            "• Качество сна (1-5)\n\n"
+            "Выберите действие:",
+            reply_markup=menu.get_checkin_menu()
+        )
+    except Exception as e:
+        logger.error(f"Error in checkin menu handler: {e}")
+        await query.edit_message_text(
+            "❌ Ошибка при открытии чек-ина",
+            reply_markup=menu.get_main_menu()
+        )
+
+async def handle_checkin_data(query, context):
+    """Обработчик ввода данных чек-ина"""
+    try:
+        context.user_data['awaiting_input'] = 'checkin_data'
+        
+        await query.edit_message_text(
+            "📝 ВВЕДИТЕ ДАННЫЕ ЧЕК-ИНА\n\n"
+            "Введите данные в формате:\n"
+            "Вес (кг), Обхват талии (см), Самочувствие (1-5), Сон (1-5)\n\n"
+            "Пример: 75.5, 85, 4, 3\n\n"
+            "📊 Шкала оценок:\n"
+            "• Самочувствие: 1(плохо) - 5(отлично)\n"
+            "• Сон: 1(бессонница) - 5(отлично выспался)\n\n"
+            "Для отмены нажмите /menu"
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in checkin data handler: {e}")
+        await query.edit_message_text(
+            "❌ Ошибка при вводе данных чек-ина",
+            reply_markup=menu.get_main_menu()
+        )
+
+async def handle_checkin_history(query, context):
+    """Обработчик истории чек-инов"""
+    try:
+        user_id = query.from_user.id
+        stats = get_user_stats(user_id)
+        
+        if not stats:
+            await query.edit_message_text(
+                "📊 У вас пока нет данных чек-инов\n\n"
+                "Начните отслеживать свой прогресс!",
+                reply_markup=menu.get_checkin_menu()
+            )
+            return
+        
+        stats_text = "📊 ИСТОРИЯ ВАШИХ ЧЕК-ИНОВ:\n\n"
+        for stat in stats[:5]:
+            date_str = stat['date'][:10] if isinstance(stat['date'], str) else stat['date'].strftime('%Y-%m-%d')
+            stats_text += f"📅 {date_str}\n"
+            stats_text += f"⚖️ Вес: {stat['weight']} кг\n"
+            stats_text += f"📏 Талия: {stat['waist_circumference']} см\n"
+            stats_text += f"😊 Самочувствие: {stat['wellbeing_score']}/5\n"
+            stats_text += f"😴 Сон: {stat['sleep_quality']}/5\n\n"
+        
+        await query.edit_message_text(
+            stats_text,
+            reply_markup=menu.get_checkin_menu()
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in checkin history handler: {e}")
+        await query.edit_message_text(
+            "❌ Ошибка при получении истории чек-инов",
+            reply_markup=menu.get_main_menu()
+        )
+
+# ==================== ОБРАБОТЧИКИ СТАТИСТИКИ ====================
+
+async def handle_stats(query, context):
+    """Обработчик статистики"""
+    try:
+        user_id = query.from_user.id
+        stats = get_user_stats(user_id)
+        
+        if not stats:
+            await query.edit_message_text(
+                "📊 У вас пока нет данных для статистики\n\n"
+                "Начните с ежедневных чек-инов!",
+                reply_markup=menu.get_main_menu()
+            )
+            return
+        
+        # Анализ прогресса
+        if len(stats) >= 2:
+            latest_weight = stats[0]['weight']
+            oldest_weight = stats[-1]['weight']
+            weight_diff = latest_weight - oldest_weight
+            
+            if weight_diff < 0:
+                progress_text = f"📉 Потеря веса: {abs(weight_diff):.1f} кг"
+            elif weight_diff > 0:
+                progress_text = f"📈 Набор веса: {weight_diff:.1f} кг"
+            else:
+                progress_text = "⚖️ Вес стабилен"
+        else:
+            progress_text = "📈 Записей пока мало для анализа прогресса"
+        
+        stats_text = f"📊 ВАША СТАТИСТИКА\n\n{progress_text}\n\n"
+        stats_text += "Последние записи:\n"
+        
+        for i, stat in enumerate(stats[:3]):
+            date_str = stat['date'][:10] if isinstance(stat['date'], str) else stat['date'].strftime('%Y-%m-%d')
+            stats_text += f"📅 {date_str}: {stat['weight']} кг, талия {stat['waist_circumference']} см\n"
+        
+        await query.edit_message_text(
+            stats_text,
+            reply_markup=menu.get_main_menu()
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in stats handler: {e}")
+        await query.edit_message_text(
+            "❌ Ошибка при получении статистики",
+            reply_markup=menu.get_main_menu()
+        )
+
+# ==================== ОБРАБОТЧИКИ МОЕГО ПЛАНА ====================
+
+async def handle_my_plan_menu(query, context):
+    """Обработчик меню моего плана"""
+    try:
+        user_id = query.from_user.id
+        plan = get_latest_plan(user_id)
+        
+        if not plan:
+            await query.edit_message_text(
+                "📋 У вас пока нет созданных планов питания\n\n"
+                "Создайте ваш первый персональный план!",
+                reply_markup=menu.get_main_menu()
+            )
+            return
+        
+        await query.edit_message_text(
+            f"📋 ВАШ ПЛАН ПИТАНИЯ\n\n"
+            f"🆔 ID плана: {plan['id']}\n"
+            f"📅 Создан: {plan['data'].get('created_at', '')[:10]}\n\n"
+            f"Выберите действие:",
+            reply_markup=menu.get_my_plan_menu(plan['id'])
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in my_plan menu handler: {e}")
+        await query.edit_message_text(
+            "❌ Ошибка при открытии плана",
+            reply_markup=menu.get_main_menu()
+        )
+
+async def handle_view_plan(query, context, plan_id):
+    """Обработчик просмотра плана"""
+    try:
+        user_id = query.from_user.id
+        plan = get_latest_plan(user_id)
+        
+        if not plan or plan['id'] != plan_id:
+            await query.edit_message_text(
+                "❌ План не найден",
+                reply_markup=menu.get_main_menu()
+            )
+            return
+        
+        plan_data = plan['data']
+        user_data = plan_data.get('user_data', {})
+        plan_text = f"📋 ВАШ ТЕКУЩИЙ ПЛАН ПИТАНИЯ\n\n"
+        plan_text += f"👤 {user_data.get('gender', '')}, {user_data.get('age', '')} лет\n"
+        plan_text += f"📏 {user_data.get('height', '')} см, {user_data.get('weight', '')} кг\n"
+        plan_text += f"🎯 Цель: {user_data.get('goal', '')}\n"
+        plan_text += f"🏃 Активность: {user_data.get('activity', '')}\n\n"
+        
+        # Показываем первый день плана
+        if plan_data.get('days'):
+            first_day = plan_data['days'][0]
+            plan_text += f"📅 {first_day['name']}:\n"
+            for meal in first_day.get('meals', [])[:3]:
+                plan_text += f"• {meal.get('time', '')} - {meal['name']} ({meal.get('calories', '')})\n"
+            plan_text += f"\n🍽️ Всего приемов пищи: 5 в день"
+        
+        plan_text += f"\n\n💧 Рекомендации: {plan_data.get('water_regime', '1.5-2 литра воды в день')}"
+        plan_text += f"\n\n🎓 {plan_data.get('professor_advice', 'Следуйте плану питания')}"
+        
+        await query.edit_message_text(
+            plan_text,
+            reply_markup=menu.get_my_plan_menu(plan_id)
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in view_plan handler: {e}")
+        await query.edit_message_text(
+            "❌ Ошибка при получении плана",
+            reply_markup=menu.get_main_menu()
+        )
+
+# ==================== ОБРАБОТЧИКИ КОРЗИНЫ ПОКУПОК ====================
+
+async def handle_shopping_cart_menu(query, context, plan_id=None):
+    """Обработчик меню корзины"""
+    try:
+        user_id = query.from_user.id
+        
+        if not plan_id:
+            plan = get_latest_plan(user_id)
+            if not plan:
+                await query.edit_message_text(
+                    "🛒 У вас пока нет плана для корзины покупок\n\n"
+                    "Создайте сначала план питания!",
+                    reply_markup=menu.get_main_menu()
+                )
+                return
+            plan_id = plan['id']
+        
+        await query.edit_message_text(
+            f"🛒 КОРЗИНА ПОКУПОК\n\n"
+            f"🆔 ID плана: {plan_id}\n\n"
+            f"Выберите действие:",
+            reply_markup=menu.get_shopping_cart_menu(plan_id)
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in shopping cart menu handler: {e}")
+        await query.edit_message_text(
+            "❌ Ошибка при открытии корзины",
+            reply_markup=menu.get_main_menu()
+        )
+
+async def handle_view_cart(query, context, plan_id):
+    """Обработчик просмотра корзины"""
+    try:
+        user_id = query.from_user.id
+        cart = get_shopping_cart(user_id, plan_id)
+        
+        if not cart:
+            await query.edit_message_text(
+                "🛒 Корзина покупок пуста\n\n"
+                "Создайте новый план питания для генерации корзины",
+                reply_markup=menu.get_shopping_cart_menu(plan_id)
+            )
+            return
+        
+        cart_text = "🛒 ВАША КОРЗИНА ПОКУПОК:\n\n"
+        total_items = 0
+        purchased_items = 0
+        
+        for category, products in cart.items():
+            cart_text += f"📦 {category}:\n"
+            for product in products:
+                status = "✅" if product['purchased'] else "⭕"
+                cart_text += f"  {status} {product['name']} - {product['quantity']}\n"
+                total_items += 1
+                if product['purchased']:
+                    purchased_items += 1
+            cart_text += "\n"
+        
+        progress = f"({purchased_items}/{total_items})" if total_items > 0 else ""
+        cart_text += f"📊 Прогресс: {progress}\n\n"
+        cart_text += "💡 Используйте меню для управления корзиной"
+        
+        await query.edit_message_text(
+            cart_text,
+            reply_markup=menu.get_shopping_cart_menu(plan_id)
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in view_cart handler: {e}")
+        await query.edit_message_text(
+            "❌ Ошибка при получении корзины",
+            reply_markup=menu.get_main_menu()
+        )
+
+async def handle_mark_purchased(query, context, plan_id):
+    """Обработчик отметки покупок"""
+    try:
+        user_id = query.from_user.id
+        cart = get_shopping_cart(user_id, plan_id)
+        
+        if not cart:
+            await query.edit_message_text(
+                "🛒 Корзина покупок пуста",
+                reply_markup=menu.get_shopping_cart_menu(plan_id)
+            )
+            return
+        
+        await query.edit_message_text(
+            "✅ ОТМЕТЬТЕ КУПЛЕННЫЕ ПРОДУКТЫ:\n\n"
+            "Нажмите на продукт, чтобы отметить его как купленный/некупленный",
+            reply_markup=menu.get_shopping_cart_products(cart, plan_id)
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in mark_purchased handler: {e}")
+        await query.edit_message_text(
+            "❌ Ошибка при отметке продуктов",
+            reply_markup=menu.get_main_menu()
+        )
+
+async def handle_toggle_product(query, context, data):
+    """Обработчик переключения статуса продукта"""
+    try:
+        parts = data.split('_')
+        plan_id = int(parts[1])
+        product_name = '_'.join(parts[2:-1])
+        purchased = bool(int(parts[-1]))
+        
+        user_id = query.from_user.id
+        
+        success = update_shopping_cart_item(user_id, plan_id, product_name, purchased)
+        
+        if success:
+            cart = get_shopping_cart(user_id, plan_id)
+            await query.edit_message_text(
+                "✅ ОТМЕТЬТЕ КУПЛЕННЫЕ ПРОДУКТЫ:\n\n"
+                "Нажмите на продукт, чтобы отметить его как купленный/некупленный",
+                reply_markup=menu.get_shopping_cart_products(cart, plan_id)
+            )
+        else:
+            await query.answer("❌ Ошибка при обновлении продукта")
+            
+    except Exception as e:
+        logger.error(f"Error in toggle_product handler: {e}")
+        await query.answer("❌ Произошла ошибка")
+
+async def handle_reset_cart(query, context, plan_id):
+    """Обработчик сброса корзины"""
+    try:
+        user_id = query.from_user.id
+        
+        success = clear_shopping_cart(user_id, plan_id)
+        
+        if success:
+            await query.edit_message_text(
+                "🔄 Все отметки в корзине сброшены",
+                reply_markup=menu.get_shopping_cart_menu(plan_id)
+            )
+        else:
+            await query.edit_message_text(
+                "❌ Ошибка при сбросе корзины",
+                reply_markup=menu.get_shopping_cart_menu(plan_id)
+            )
+        
+    except Exception as e:
+        logger.error(f"Error in reset_cart handler: {e}")
+        await query.edit_message_text(
+            "❌ Ошибка при сбросе корзины",
+            reply_markup=menu.get_main_menu()
+        )
+
+async def handle_download_txt(query, context, plan_id):
+    """Обработчик скачивания TXT файлов"""
+    try:
+        user_id = query.from_user.id
+        plan = get_latest_plan(user_id)
+        
+        if not plan or plan['id'] != plan_id:
+            await query.answer("❌ План не найден")
+            return
+        
+        plan_data = plan['data']
+        files = TXTGenerator.generate_plan_files(plan_data)
+        
+        if not files:
+            await query.answer("❌ Ошибка при генерации файлов")
+            return
+        
+        # Отправляем три файла
+        for file_type, content in files.items():
+            file_io = io.BytesIO(content.encode('utf-8'))
+            file_io.name = f"{file_type}_plan_{plan_id}.txt"
+            
+            caption = {
+                'plan': "📋 Ваш план питания",
+                'recipes': "📖 Книга рецептов", 
+                'cart': "🛒 Корзина покупок"
+            }.get(file_type, "Файл")
+            
+            await context.bot.send_document(
+                chat_id=user_id,
+                document=file_io,
+                caption=caption
+            )
+        
+        await query.answer("✅ Файлы отправлены!")
+        
+    except Exception as e:
+        logger.error(f"Error in download_txt handler: {e}")
+        await query.answer("❌ Ошибка при отправке файлов")
+
+# ==================== ОБРАБОТЧИК ПОМОЩИ ====================
+
+async def handle_help(query, context):
+    """Обработчик помощи"""
+    help_text = """
+❓ ПОМОЩЬ ПО БОТУ
+
+📊 СОЗДАТЬ ПЛАН:
+• Создает персонализированный план питания на 7 дней
+• Учитывает ваш пол, цель, активность и параметры
+• Доступен раз в 7 дней (админам - безлимитно)
+• Использует AI профессора нутрициологии
+
+📈 ЧЕК-ИН:
+• Ежедневное отслеживание прогресса
+• Запись веса, обхвата талии, самочувствия
+• Просмотр истории и статистики
+
+📊 СТАТИСТИКА:
+• Анализ вашего прогресса  
+• Графики изменений параметров
+
+📋 МОЙ ПЛАН:
+• Просмотр текущего плана питания
+• Доступ к корзине покупок
+• Скачивание TXT файлов
+
+🛒 КОРЗИНА ПОКУПОК:
+• Автоматическая генерация списка покупок
+• Отметка купленных продуктов
+• Сброс отметок
+• Скачивание списка
+
+📥 СКАЧАТЬ TXT:
+• План питания на 7 дней
+• Книга рецептов с инструкциями
+• Корзина покупок с суммарными количествами
+
+💡 Советы:
+• Вводите данные точно
+• Следуйте плану питания
+• Регулярно делайте чек-ин
+• Пейте достаточное количество воды
+
+👑 АДМИН:
+• Статистика использования бота
+• Мониторинг состояния системы
+"""
+    await query.edit_message_text(
+        help_text,
+        reply_markup=menu.get_main_menu()
+    )
+
+async def show_main_menu(query):
+    """Показывает главное меню"""
+    await query.edit_message_text(
+        "🤖 ГЛАВНОЕ МЕНЮ\n\nВыберите действие:",
+        reply_markup=menu.get_main_menu()
+    )
+
+# ==================== ОБРАБОТЧИКИ СООБЩЕНИЙ ====================
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик текстовых сообщений"""
+    try:
+        text = update.message.text.strip()
+        user_id = update.effective_user.id
+        
+        if text == "/menu":
+            await update.message.reply_text(
+                "🤖 ГЛАВНОЕ МЕНЮ\n\nВыберите действие:",
+                reply_markup=menu.get_main_menu()
+            )
+            return
+        
+        if context.user_data.get('awaiting_input') == 'plan_details':
+            await process_plan_details(update, context, text)
+        elif context.user_data.get('awaiting_input') == 'checkin_data':
+            await process_checkin_data(update, context, text)
+        else:
+            await update.message.reply_text(
+                "🤖 Используйте меню для навигации",
+                reply_markup=menu.get_main_menu()
+            )
+                
+    except Exception as e:
+        logger.error(f"❌ Error in message handler: {e}")
+        await update.message.reply_text(
+            "❌ Произошла ошибка. Попробуйте снова.",
+            reply_markup=menu.get_main_menu()
+        )
 
 async def process_plan_details(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
     """Обрабатывает детали плана"""
@@ -1369,7 +2073,114 @@ async def process_plan_details(update: Update, context: ContextTypes.DEFAULT_TYP
             reply_markup=menu.get_main_menu()
         )
 
-# [Остальной код обработчиков остается без изменений]
+async def process_checkin_data(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+    """Обрабатывает данные чек-ина"""
+    try:
+        parts = [part.strip() for part in text.split(',')]
+        if len(parts) != 4:
+            raise ValueError("Нужно ввести 4 значения через запятую")
+        
+        weight, waist, wellbeing, sleep = float(parts[0]), int(parts[1]), int(parts[2]), int(parts[3])
+        
+        if not (30 <= weight <= 300):
+            raise ValueError("Вес должен быть от 30 до 300 кг")
+        if not (50 <= waist <= 200):
+            raise ValueError("Обхват талии должен быть от 50 до 200 см")
+        if not (1 <= wellbeing <= 5):
+            raise ValueError("Самочувствие должно быть от 1 до 5")
+        if not (1 <= sleep <= 5):
+            raise ValueError("Качество сна должно быть от 1 до 5")
+        
+        user_id = update.effective_user.id
+        save_checkin(user_id, weight, waist, wellbeing, sleep)
+        
+        success_text = f"""
+✅ ДАННЫЕ ЧЕК-ИНА СОХРАНЕНЫ!
+
+📅 Дата: {datetime.now().strftime('%d.%m.%Y')}
+⚖️ Вес: {weight} кг
+📏 Талия: {waist} см
+😊 Самочувствие: {wellbeing}/5
+😴 Сон: {sleep}/5
+
+Продолжайте отслеживать ваш прогресс!
+"""
+        await update.message.reply_text(
+            success_text,
+            reply_markup=menu.get_main_menu()
+        )
+        
+        # Очищаем временные данные
+        context.user_data['awaiting_input'] = None
+        
+    except ValueError as e:
+        error_msg = str(e)
+        if "Нужно ввести 4 значения" in error_msg:
+            await update.message.reply_text(
+                "❌ Ошибка в формате данных. Используйте: Вес, Талия, Самочувствие, Сон\nПример: 75.5, 85, 4, 3\n\nПопробуйте снова или нажмите /menu для отмены"
+            )
+        else:
+            await update.message.reply_text(
+                f"❌ {error_msg}\n\nПопробуйте снова или нажмите /menu для отмены"
+            )
+    except Exception as e:
+        logger.error(f"❌ Error processing checkin data: {e}")
+        await update.message.reply_text(
+            "❌ Произошла ошибка при сохранении чек-ина. Попробуйте снова.",
+            reply_markup=menu.get_main_menu()
+        )
+
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик ошибок"""
+    try:
+        logger.error(f"❌ Exception while handling update: {context.error}")
+        
+        if update and update.effective_message:
+            await update.effective_message.reply_text(
+                "❌ Произошла непредвиденная ошибка. Попробуйте позже.",
+                reply_markup=menu.get_main_menu()
+            )
+    except Exception as e:
+        logger.error(f"Error in error handler: {e}")
+
+def init_bot():
+    """Инициализация бота"""
+    global application
+    try:
+        Config.validate()
+        init_database()
+        
+        application = Application.builder().token(Config.BOT_TOKEN).build()
+        
+        # Регистрируем все обработчики
+        application.add_handler(CommandHandler("start", start_command))
+        application.add_handler(CommandHandler("menu", menu_command))
+        application.add_handler(CommandHandler("admin", admin_command))
+        application.add_handler(CallbackQueryHandler(handle_callback))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        
+        application.add_error_handler(error_handler)
+        
+        logger.info("✅ Bot initialized successfully")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize bot: {e}")
+        return False
+
+async def setup_webhook():
+    """Настройка webhook"""
+    try:
+        if Config.WEBHOOK_URL and not Config.RENDER:
+            webhook_url = f"{Config.WEBHOOK_URL}/webhook"
+            await application.bot.set_webhook(webhook_url)
+            logger.info(f"✅ Webhook set: {webhook_url}")
+            return True
+        else:
+            logger.info("ℹ️ Using polling mode (Render detected)")
+            return False
+    except Exception as e:
+        logger.error(f"❌ Webhook setup failed: {e}")
+        return False
 
 # ==================== WEBHOOK ROUTES ====================
 
