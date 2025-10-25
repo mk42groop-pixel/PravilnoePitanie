@@ -2,6 +2,7 @@ import os
 import logging
 import sqlite3
 import json
+import asyncio
 from datetime import datetime
 from flask import Flask, jsonify, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -327,7 +328,7 @@ def init_bot():
         Config.validate()
         init_database()
         
-        # Создаем приложение бота
+        # Создаем приложение бота с обработкой обновлений
         application = Application.builder().token(Config.BOT_TOKEN).build()
         
         # Настраиваем обработчики
@@ -337,7 +338,10 @@ def init_bot():
         application.add_handler(CallbackQueryHandler(handle_callback))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         
-        logger.info("✅ Bot initialized successfully")
+        # Запускаем обработку обновлений в фоне
+        application.run_polling(allowed_updates=Update.ALL_TYPES, close_loop=False)
+        
+        logger.info("✅ Bot initialized successfully with webhook support")
         return True
     except Exception as e:
         logger.error(f"❌ Failed to initialize bot: {e}")
@@ -369,6 +373,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             welcome_text,
             reply_markup=menu.get_main_menu()
         )
+        logger.info(f"✅ Start command processed for user {user.id}")
         
     except Exception as e:
         logger.error(f"❌ Error in start_command: {e}")
@@ -942,12 +947,32 @@ def health_check():
     })
 
 @app.route('/webhook', methods=['POST'])
-def webhook():
+async def webhook():
     """Webhook endpoint for Telegram"""
-    if request.method == "POST" and application:
-        update = Update.de_json(request.get_json(), application.bot)
-        application.update_queue.put(update)
-    return "ok"
+    try:
+        if request.method == "POST" and application:
+            logger.info("📨 Webhook received")
+            update = Update.de_json(request.get_json(), application.bot)
+            await application.process_update(update)
+            return "ok"
+        return "error"
+    except Exception as e:
+        logger.error(f"❌ Webhook error: {e}")
+        return "error"
+
+@app.route('/set_webhook', methods=['GET'])
+async def set_webhook():
+    """Установка webhook"""
+    try:
+        webhook_url = f"https://{request.host}/webhook"
+        await application.bot.set_webhook(webhook_url)
+        return jsonify({
+            "status": "success", 
+            "message": "Webhook set successfully",
+            "webhook_url": webhook_url
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
 
 # ==================== ЗАПУСК ПРИЛОЖЕНИЯ ====================
 
