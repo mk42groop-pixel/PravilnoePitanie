@@ -2,6 +2,7 @@ import os
 import logging
 import sqlite3
 import json
+import asyncio
 from datetime import datetime
 from flask import Flask, jsonify, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -351,12 +352,13 @@ async def setup_webhook():
             webhook_url = f"{Config.WEBHOOK_URL}/webhook"
             await application.bot.set_webhook(webhook_url)
             logger.info(f"✅ Webhook set: {webhook_url}")
+            return True
         else:
-            # Если нет WEBHOOK_URL, используем polling
-            application.run_polling(allowed_updates=Update.ALL_TYPES, close_loop=False)
-            logger.info("✅ Bot started in polling mode")
+            logger.info("ℹ️ WEBHOOK_URL not set, using polling mode")
+            return False
     except Exception as e:
         logger.error(f"❌ Webhook setup failed: {e}")
+        return False
 
 # ==================== ОБРАБОТЧИКИ КОМАНД ====================
 
@@ -958,13 +960,13 @@ def health_check():
     })
 
 @app.route('/webhook', methods=['POST'])
-async def webhook():
+def webhook():
     """Webhook endpoint for Telegram"""
     try:
         if request.method == "POST" and application:
             logger.info("📨 Webhook received")
             update = Update.de_json(request.get_json(), application.bot)
-            await application.process_update(update)
+            application.update_queue.put(update)
             return "ok"
         return "error"
     except Exception as e:
@@ -972,12 +974,18 @@ async def webhook():
         return "error"
 
 @app.route('/set_webhook', methods=['GET'])
-async def set_webhook():
+def set_webhook():
     """Установка webhook"""
     try:
-        if Config.WEBHOOK_URL:
+        if application and Config.WEBHOOK_URL:
             webhook_url = f"{Config.WEBHOOK_URL}/webhook"
-            await application.bot.set_webhook(webhook_url)
+            
+            # Используем asyncio для вызова асинхронной функции
+            async def set_webhook_async():
+                await application.bot.set_webhook(webhook_url)
+            
+            asyncio.run(set_webhook_async())
+            
             return jsonify({
                 "status": "success", 
                 "message": "Webhook set successfully",
@@ -986,9 +994,10 @@ async def set_webhook():
         else:
             return jsonify({
                 "status": "info", 
-                "message": "WEBHOOK_URL not set, using polling mode"
+                "message": "WEBHOOK_URL not set or application not initialized"
             })
     except Exception as e:
+        logger.error(f"❌ Webhook setup error: {e}")
         return jsonify({"status": "error", "error": str(e)}), 500
 
 # ==================== ЗАПУСК ПРИЛОЖЕНИЯ ====================
@@ -1001,8 +1010,10 @@ def main():
         return
     
     # Настройка webhook
-    import asyncio
-    asyncio.run(setup_webhook())
+    try:
+        asyncio.run(setup_webhook())
+    except Exception as e:
+        logger.error(f"❌ Webhook setup failed: {e}")
     
     # Запуск Flask приложения
     logger.info(f"🚀 Starting Flask app on port {Config.PORT}")
