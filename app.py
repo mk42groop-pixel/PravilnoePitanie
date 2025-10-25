@@ -812,7 +812,13 @@ class YandexGPTService:
         if not days:
             day_names = ['ПОНЕДЕЛЬНИК', 'ВТОРНИК', 'СРЕДА', 'ЧЕТВЕРГ', 'ПЯТНИЦА', 'СУББОТА', 'ВОСКРЕСЕНЬЕ']
             for day_name in day_names:
-                pattern = f'{day_name}[^\\n]*(.*?)(?={day_names[day_names.index(day_name)+1] if day_names.index(day_name) < 6 else "СПИСОК ПОКУПОК"})'
+                next_day_index = day_names.index(day_name) + 1
+                if next_day_index < len(day_names):
+                    next_day = day_names[next_day_index]
+                else:
+                    next_day = "СПИСОК ПОКУПОК"
+                
+                pattern = f'{day_name}[^\\n]*(.*?)(?={next_day})'
                 match = re.search(pattern, gpt_response, re.IGNORECASE | re.DOTALL)
                 if match:
                     days.append(match.group(1).strip())
@@ -850,8 +856,14 @@ class YandexGPTService:
         meals = []
         meal_types = ['ЗАВТРАК', 'ПЕРЕКУС 1', 'ОБЕД', 'ПЕРЕКУС 2', 'УЖИН']
         
-        for meal_type in meal_types:
-            meal_pattern = f'{meal_type}.*?\n(.*?)(?={meal_types[meal_types.index(meal_type)+1] if meal_types.index(meal_type) < 4 else "ДЕНЬ"|$)'
+        for i, meal_type in enumerate(meal_types):
+            # Исправленная f-строка - выносим логику наружу
+            if i < len(meal_types) - 1:
+                next_meal = meal_types[i + 1]
+            else:
+                next_meal = "ДЕНЬ"
+            
+            meal_pattern = f'{meal_type}.*?\n(.*?)(?={next_meal}|$)'
             meal_match = re.search(meal_pattern, day_text, re.IGNORECASE | re.DOTALL)
             
             if meal_match:
@@ -1003,7 +1015,6 @@ class YandexGPTService:
             'овощ': 'Овощи', 'салат': 'Овощи', 'брокколи': 'Овощи', 'морковь': 'Овощи',
             'помидор': 'Овощи', 'огурец': 'Овощи', 'капуста': 'Овощи', 'лук': 'Овощи',
             'перец': 'Овощи', 'баклажан': 'Овощи', 'кабачок': 'Овочи', 'тыква': 'Овощи',
-            # ... остальные категории
         }
         
         for day in days:
@@ -1365,7 +1376,7 @@ async def handle_goal_back(query, context):
         context.user_data['plan_step'] = 2
         
         await query.edit_message_text(
-            "📊 СОЗДАНИЕ ПЛАНА ПИТАНИЯ\n\n2️⃣ Выберите вашу цель:",
+            "📊 СОЗДАНИЕ ПЛАНа ПИТАНИЯ\n\n2️⃣ Выберите вашу цель:",
             reply_markup=menu.get_plan_data_input(step=2)
         )
     except Exception as e:
