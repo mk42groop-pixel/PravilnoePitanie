@@ -974,6 +974,8 @@ async def set_webhook():
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)}), 500
 
+# ... (весь предыдущий код остается без изменений до самого конца)
+
 # ==================== ЗАПУСК ПРИЛОЖЕНИЯ ====================
 
 def main():
@@ -983,9 +985,12 @@ def main():
         logger.error("❌ Failed to initialize bot. Exiting.")
         return
     
-    # Запуск Flask приложения
+    # Запуск Flask приложения на порту 10000
     logger.info(f"🚀 Starting Flask app on port {Config.PORT}")
-    app.run(host='0.0.0.0', port=Config.PORT, debug=False, use_reloader=False)
+    
+    # Явно указываем порт для Render
+    port = int(os.environ.get('PORT', Config.PORT))
+    app.run(host='0.0.0.0', port=port, debug=False)
 
 if __name__ == "__main__":
     main()
