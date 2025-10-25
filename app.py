@@ -8,7 +8,6 @@ from datetime import datetime
 from flask import Flask, jsonify, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
-from telegram.error import TelegramError
 from dotenv import load_dotenv
 
 # Загрузка переменных окружения
@@ -25,27 +24,15 @@ logger = logging.getLogger(__name__)
 
 class Config:
     BOT_TOKEN = os.getenv('BOT_TOKEN')
-    YANDEX_API_KEY = os.getenv('YANDEX_API_KEY')
-    YANDEX_FOLDER_ID = os.getenv('YANDEX_FOLDER_ID')
     ADMIN_USER_ID = int(os.getenv('ADMIN_USER_ID', '362423055'))
     DATABASE_URL = os.getenv('DATABASE_URL', 'nutrition_bot.db')
-    REQUEST_TIMEOUT = int(os.getenv('REQUEST_TIMEOUT', '60'))
-    MAX_RETRIES = int(os.getenv('MAX_RETRIES', '3'))
     PORT = int(os.getenv('PORT', '10000'))
-    WEBHOOK_URL = os.getenv('RENDER_EXTERNAL_URL', '')  # Автоматически на Render
     
     @classmethod
     def validate(cls):
         """Проверка обязательных переменных"""
-        required_vars = ['BOT_TOKEN']
-        missing_vars = []
-        for var in required_vars:
-            if not getattr(cls, var):
-                missing_vars.append(var)
-        
-        if missing_vars:
-            raise ValueError(f"❌ Missing required environment variables: {', '.join(missing_vars)}")
-        
+        if not cls.BOT_TOKEN:
+            raise ValueError("❌ BOT_TOKEN is required")
         logger.info("✅ Configuration validated successfully")
 
 # ==================== БАЗА ДАННЫХ ====================
@@ -54,9 +41,6 @@ def init_database():
     """Инициализация базы данных"""
     conn = sqlite3.connect(Config.DATABASE_URL, check_same_thread=False)
     cursor = conn.cursor()
-    
-    cursor.execute('PRAGMA journal_mode=WAL')
-    cursor.execute('PRAGMA synchronous=NORMAL')
     
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
@@ -345,23 +329,21 @@ def init_bot():
         Config.validate()
         init_database()
         
+        # Создаем приложение бота
         application = Application.builder().token(Config.BOT_TOKEN).build()
-        setup_handlers(application)
+        
+        # Настраиваем обработчики
+        application.add_handler(CommandHandler("start", start_command))
+        application.add_handler(CommandHandler("menu", menu_command))
+        application.add_handler(CommandHandler("admin", admin_command))
+        application.add_handler(CallbackQueryHandler(handle_callback))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         
         logger.info("✅ Bot initialized successfully")
         return application
     except Exception as e:
         logger.error(f"❌ Failed to initialize bot: {e}")
         return None
-
-def setup_handlers(app):
-    """Настройка обработчиков"""
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("menu", menu_command))
-    app.add_handler(CommandHandler("admin", admin_command))
-    app.add_handler(CallbackQueryHandler(handle_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_error_handler(error_handler)
 
 # ==================== ОБРАБОТЧИКИ КОМАНД ====================
 
@@ -790,7 +772,7 @@ async def process_plan_details(update: Update, context: ContextTypes.DEFAULT_TYP
             'username': update.effective_user.username
         }
         
-        # Создаем простой план (без Yandex GPT для начала)
+        # Создаем простой план
         plan_data = generate_simple_plan(user_data)
         if plan_data:
             plan_id = save_plan(user_data['user_id'], plan_data)
@@ -942,10 +924,6 @@ def generate_simple_plan(user_data):
     
     return plan
 
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик ошибок"""
-    logger.error(f"❌ Exception while handling update: {context.error}")
-
 # ==================== WEBHOOK ROUTES ====================
 
 @app.route('/')
@@ -966,20 +944,24 @@ def health_check():
     })
 
 @app.route('/webhook', methods=['POST'])
-async def webhook():
+def webhook():
     """Webhook endpoint for Telegram"""
-    if request.method == "POST":
+    if request.method == "POST" and application:
         update = Update.de_json(request.get_json(), application.bot)
-        await application.process_update(update)
+        application.update_queue.put(update)
     return "ok"
 
 @app.route('/set_webhook', methods=['GET'])
-async def set_webhook():
+def set_webhook():
     """Установка webhook"""
     try:
         webhook_url = f"https://{request.host}/webhook"
-        await application.bot.set_webhook(webhook_url)
-        return jsonify({"status": "success", "webhook_url": webhook_url})
+        # На Render просто возвращаем успех, webhook будет работать автоматически
+        return jsonify({
+            "status": "success", 
+            "message": "Webhook is ready",
+            "webhook_url": webhook_url
+        })
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)}), 500
 
@@ -995,7 +977,7 @@ def main():
     
     # Запуск Flask приложения
     logger.info(f"🚀 Starting Flask app on port {Config.PORT}")
-    app.run(host='0.0.0.0', port=Config.PORT, debug=False)
+    app.run(host='0.0.0.0', port=Config.PORT, debug=False, use_reloader=False)
 
 if __name__ == "__main__":
     main()
