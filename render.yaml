@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: nutrition-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_USER_ID
+        value: "362423055"
+      - key: PORT
+        value: "10000"
