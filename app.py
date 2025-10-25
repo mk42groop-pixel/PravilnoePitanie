@@ -2,7 +2,6 @@ import os
 import logging
 import sqlite3
 import json
-import asyncio
 from datetime import datetime
 from flask import Flask, jsonify, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -26,6 +25,7 @@ class Config:
     ADMIN_USER_ID = int(os.getenv('ADMIN_USER_ID', '362423055'))
     DATABASE_URL = os.getenv('DATABASE_URL', 'nutrition_bot.db')
     PORT = int(os.getenv('PORT', '10000'))
+    WEBHOOK_URL = os.getenv('WEBHOOK_URL', '')
     
     @classmethod
     def validate(cls):
@@ -328,7 +328,7 @@ def init_bot():
         Config.validate()
         init_database()
         
-        # Создаем приложение бота с обработкой обновлений
+        # Создаем приложение бота
         application = Application.builder().token(Config.BOT_TOKEN).build()
         
         # Настраиваем обработчики
@@ -338,14 +338,25 @@ def init_bot():
         application.add_handler(CallbackQueryHandler(handle_callback))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         
-        # Запускаем обработку обновлений в фоне
-        application.run_polling(allowed_updates=Update.ALL_TYPES, close_loop=False)
-        
-        logger.info("✅ Bot initialized successfully with webhook support")
+        logger.info("✅ Bot initialized successfully")
         return True
     except Exception as e:
         logger.error(f"❌ Failed to initialize bot: {e}")
         return False
+
+async def setup_webhook():
+    """Настройка webhook"""
+    try:
+        if Config.WEBHOOK_URL:
+            webhook_url = f"{Config.WEBHOOK_URL}/webhook"
+            await application.bot.set_webhook(webhook_url)
+            logger.info(f"✅ Webhook set: {webhook_url}")
+        else:
+            # Если нет WEBHOOK_URL, используем polling
+            application.run_polling(allowed_updates=Update.ALL_TYPES, close_loop=False)
+            logger.info("✅ Bot started in polling mode")
+    except Exception as e:
+        logger.error(f"❌ Webhook setup failed: {e}")
 
 # ==================== ОБРАБОТЧИКИ КОМАНД ====================
 
@@ -964,17 +975,21 @@ async def webhook():
 async def set_webhook():
     """Установка webhook"""
     try:
-        webhook_url = f"https://{request.host}/webhook"
-        await application.bot.set_webhook(webhook_url)
-        return jsonify({
-            "status": "success", 
-            "message": "Webhook set successfully",
-            "webhook_url": webhook_url
-        })
+        if Config.WEBHOOK_URL:
+            webhook_url = f"{Config.WEBHOOK_URL}/webhook"
+            await application.bot.set_webhook(webhook_url)
+            return jsonify({
+                "status": "success", 
+                "message": "Webhook set successfully",
+                "webhook_url": webhook_url
+            })
+        else:
+            return jsonify({
+                "status": "info", 
+                "message": "WEBHOOK_URL not set, using polling mode"
+            })
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)}), 500
-
-# ... (весь предыдущий код остается без изменений до самого конца)
 
 # ==================== ЗАПУСК ПРИЛОЖЕНИЯ ====================
 
@@ -985,10 +1000,12 @@ def main():
         logger.error("❌ Failed to initialize bot. Exiting.")
         return
     
-    # Запуск Flask приложения на порту 10000
-    logger.info(f"🚀 Starting Flask app on port {Config.PORT}")
+    # Настройка webhook
+    import asyncio
+    asyncio.run(setup_webhook())
     
-    # Явно указываем порт для Render
+    # Запуск Flask приложения
+    logger.info(f"🚀 Starting Flask app on port {Config.PORT}")
     port = int(os.environ.get('PORT', Config.PORT))
     app.run(host='0.0.0.0', port=port, debug=False)
 
