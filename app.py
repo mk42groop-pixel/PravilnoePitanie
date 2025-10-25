@@ -3,10 +3,14 @@ import logging
 import sqlite3
 import json
 import asyncio
+import threading
+import time
+import requests
 from datetime import datetime
 from flask import Flask, jsonify, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
+from telegram.error import TelegramError
 from dotenv import load_dotenv
 
 # Загрузка переменных окружения
@@ -15,7 +19,11 @@ load_dotenv()
 # Настройка логирования
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.INFO,
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('bot.log', encoding='utf-8')
+    ]
 )
 logger = logging.getLogger(__name__)
 
@@ -26,7 +34,8 @@ class Config:
     ADMIN_USER_ID = int(os.getenv('ADMIN_USER_ID', '362423055'))
     DATABASE_URL = os.getenv('DATABASE_URL', 'nutrition_bot.db')
     PORT = int(os.getenv('PORT', '10000'))
-    WEBHOOK_URL = os.getenv('WEBHOOK_URL', '')
+    WEBHOOK_URL = os.getenv('WEBHOOK_URL', 'https://pravilnoepitanie.onrender.com')
+    RENDER = os.getenv('RENDER', 'true').lower() == 'true'
     
     @classmethod
     def validate(cls):
@@ -41,6 +50,11 @@ def init_database():
     """Инициализация базы данных"""
     conn = sqlite3.connect(Config.DATABASE_URL, check_same_thread=False)
     cursor = conn.cursor()
+    
+    # Включаем WAL mode для лучшей производительности
+    cursor.execute('PRAGMA journal_mode=WAL')
+    cursor.execute('PRAGMA synchronous=NORMAL')
+    cursor.execute('PRAGMA foreign_keys=ON')
     
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
@@ -58,7 +72,8 @@ def init_database():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
             plan_data TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users (user_id)
         )
     ''')
     
@@ -70,7 +85,8 @@ def init_database():
             waist_circumference INTEGER,
             wellbeing_score INTEGER,
             sleep_quality INTEGER,
-            date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users (user_id)
         )
     ''')
     
@@ -79,17 +95,32 @@ def init_database():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER UNIQUE NOT NULL,
             last_plan_date TIMESTAMP,
-            plan_count INTEGER DEFAULT 0
+            plan_count INTEGER DEFAULT 0,
+            FOREIGN KEY (user_id) REFERENCES users (user_id)
         )
     ''')
+    
+    # Создаем индексы для улучшения производительности
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_users_user_id ON users(user_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_plans_user_id ON nutrition_plans(user_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_checkins_user_id ON daily_checkins(user_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_checkins_date ON daily_checkins(date)')
     
     conn.commit()
     conn.close()
     logger.info("✅ Database initialized successfully")
 
+class DatabaseManager:
+    @staticmethod
+    def get_connection():
+        """Возвращает соединение с базой данных"""
+        conn = sqlite3.connect(Config.DATABASE_URL, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        return conn
+
 def save_user(user_data):
     """Сохраняет пользователя в БД"""
-    conn = sqlite3.connect(Config.DATABASE_URL, check_same_thread=False)
+    conn = DatabaseManager.get_connection()
     cursor = conn.cursor()
     
     try:
@@ -113,7 +144,7 @@ def can_make_request(user_id):
         if is_admin(user_id):
             return True
             
-        conn = sqlite3.connect(Config.DATABASE_URL, check_same_thread=False)
+        conn = DatabaseManager.get_connection()
         cursor = conn.cursor()
         
         cursor.execute('SELECT last_plan_date FROM user_limits WHERE user_id = ?', (user_id,))
@@ -122,7 +153,7 @@ def can_make_request(user_id):
         if not result:
             return True
             
-        last_plan_date = datetime.fromisoformat(result[0])
+        last_plan_date = datetime.fromisoformat(result['last_plan_date'])
         days_since_last_plan = (datetime.now() - last_plan_date).days
         
         conn.close()
@@ -138,7 +169,7 @@ def update_user_limit(user_id):
         if is_admin(user_id):
             return
             
-        conn = sqlite3.connect(Config.DATABASE_URL, check_same_thread=False)
+        conn = DatabaseManager.get_connection()
         cursor = conn.cursor()
         
         current_time = datetime.now().isoformat()
@@ -160,7 +191,7 @@ def get_days_until_next_plan(user_id):
         if is_admin(user_id):
             return 0
             
-        conn = sqlite3.connect(Config.DATABASE_URL, check_same_thread=False)
+        conn = DatabaseManager.get_connection()
         cursor = conn.cursor()
         
         cursor.execute('SELECT last_plan_date FROM user_limits WHERE user_id = ?', (user_id,))
@@ -169,7 +200,7 @@ def get_days_until_next_plan(user_id):
         if not result:
             return 0
             
-        last_plan_date = datetime.fromisoformat(result[0])
+        last_plan_date = datetime.fromisoformat(result['last_plan_date'])
         days_passed = (datetime.now() - last_plan_date).days
         days_remaining = 7 - days_passed
         
@@ -182,12 +213,12 @@ def get_days_until_next_plan(user_id):
 
 def save_plan(user_id, plan_data):
     """Сохраняет план питания в БД"""
-    conn = sqlite3.connect(Config.DATABASE_URL, check_same_thread=False)
+    conn = DatabaseManager.get_connection()
     cursor = conn.cursor()
     
     try:
         cursor.execute('INSERT INTO nutrition_plans (user_id, plan_data) VALUES (?, ?)', 
-                      (user_id, json.dumps(plan_data)))
+                      (user_id, json.dumps(plan_data, ensure_ascii=False)))
         plan_id = cursor.lastrowid
         conn.commit()
         logger.info(f"✅ Plan saved for user: {user_id}, plan_id: {plan_id}")
@@ -200,7 +231,7 @@ def save_plan(user_id, plan_data):
 
 def save_checkin(user_id, weight, waist, wellbeing, sleep):
     """Сохраняет ежедневный чек-ин"""
-    conn = sqlite3.connect(Config.DATABASE_URL, check_same_thread=False)
+    conn = DatabaseManager.get_connection()
     cursor = conn.cursor()
     
     try:
@@ -217,7 +248,7 @@ def save_checkin(user_id, weight, waist, wellbeing, sleep):
 
 def get_user_stats(user_id):
     """Получает статистику пользователя"""
-    conn = sqlite3.connect(Config.DATABASE_URL, check_same_thread=False)
+    conn = DatabaseManager.get_connection()
     cursor = conn.cursor()
     
     try:
@@ -225,7 +256,7 @@ def get_user_stats(user_id):
             SELECT date, weight, waist_circumference, wellbeing_score, sleep_quality
             FROM daily_checkins WHERE user_id = ? ORDER BY date DESC LIMIT 7
         ''', (user_id,))
-        checkins = cursor.fetchall()
+        checkins = [dict(row) for row in cursor.fetchall()]
         return checkins
     except Exception as e:
         logger.error(f"❌ Error getting stats: {e}")
@@ -235,7 +266,7 @@ def get_user_stats(user_id):
 
 def get_latest_plan(user_id):
     """Получает последний план пользователя"""
-    conn = sqlite3.connect(Config.DATABASE_URL, check_same_thread=False)
+    conn = DatabaseManager.get_connection()
     cursor = conn.cursor()
     
     try:
@@ -244,7 +275,7 @@ def get_latest_plan(user_id):
             WHERE user_id = ? ORDER BY created_at DESC LIMIT 1
         ''', (user_id,))
         result = cursor.fetchone()
-        return json.loads(result[0]) if result else None
+        return json.loads(result['plan_data']) if result else None
     except Exception as e:
         logger.error(f"❌ Error getting latest plan: {e}")
         return None
@@ -314,6 +345,55 @@ class InteractiveMenu:
         ]
         return InlineKeyboardMarkup(keyboard)
 
+# ==================== KEEP-ALIVE SERVICE ====================
+
+class KeepAliveService:
+    def __init__(self):
+        self.is_running = False
+        self.thread = None
+        
+    def start(self):
+        """Запускает сервис keep-alive"""
+        if self.is_running:
+            return
+            
+        self.is_running = True
+        self.thread = threading.Thread(target=self._keep_alive_worker, daemon=True)
+        self.thread.start()
+        logger.info("🚀 Keep-alive service started")
+        
+    def stop(self):
+        """Останавливает сервис keep-alive"""
+        self.is_running = False
+        if self.thread:
+            self.thread.join(timeout=5)
+        logger.info("🛑 Keep-alive service stopped")
+        
+    def _keep_alive_worker(self):
+        """Фоновая работа keep-alive"""
+        base_url = Config.WEBHOOK_URL
+        endpoints = ['/', '/health', '/ping']
+        
+        while self.is_running:
+            try:
+                for endpoint in endpoints:
+                    url = f"{base_url}{endpoint}"
+                    try:
+                        response = requests.get(url, timeout=10)
+                        logger.debug(f"🏓 Keep-alive ping to {url} - Status: {response.status_code}")
+                    except requests.exceptions.RequestException as e:
+                        logger.warning(f"⚠️ Keep-alive ping failed for {url}: {e}")
+                
+                # Ждем 4 минуты до следующего пинга (меньше 5 минут Render timeout)
+                for _ in range(240):  # 4 минуты в секундах
+                    if not self.is_running:
+                        break
+                    time.sleep(1)
+                    
+            except Exception as e:
+                logger.error(f"❌ Keep-alive worker error: {e}")
+                time.sleep(60)
+
 # ==================== FLASK APP ====================
 
 app = Flask(__name__)
@@ -321,6 +401,7 @@ app = Flask(__name__)
 # Глобальные переменные для бота
 application = None
 menu = InteractiveMenu()
+keep_alive_service = KeepAliveService()
 
 def init_bot():
     """Инициализация бота"""
@@ -339,6 +420,9 @@ def init_bot():
         application.add_handler(CallbackQueryHandler(handle_callback))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         
+        # Обработчик ошибок
+        application.add_error_handler(error_handler)
+        
         logger.info("✅ Bot initialized successfully")
         return True
     except Exception as e:
@@ -348,13 +432,13 @@ def init_bot():
 async def setup_webhook():
     """Настройка webhook"""
     try:
-        if Config.WEBHOOK_URL:
+        if Config.WEBHOOK_URL and not Config.RENDER:
             webhook_url = f"{Config.WEBHOOK_URL}/webhook"
             await application.bot.set_webhook(webhook_url)
             logger.info(f"✅ Webhook set: {webhook_url}")
             return True
         else:
-            logger.info("ℹ️ WEBHOOK_URL not set, using polling mode")
+            logger.info("ℹ️ Using polling mode (Render detected)")
             return False
     except Exception as e:
         logger.error(f"❌ Webhook setup failed: {e}")
@@ -376,6 +460,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         welcome_text = """
 🎯 Добро пожаловать в бот персонализированного питания!
+
+🤖 Я помогу вам:
+• Создать персональный план питания
+• Отслеживать прогресс
+• Анализировать статистику
 
 Выберите действие из меню ниже:
 """
@@ -406,10 +495,39 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ У вас нет прав доступа")
         return
     
-    await update.message.reply_text(
-        "👑 ПАНЕЛЬ АДМИНИСТРАТОРА - Функции в разработке",
-        reply_markup=menu.get_main_menu()
-    )
+    # Статистика для админа
+    conn = DatabaseManager.get_connection()
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute('SELECT COUNT(*) as total_users FROM users')
+        total_users = cursor.fetchone()['total_users']
+        
+        cursor.execute('SELECT COUNT(*) as total_plans FROM nutrition_plans')
+        total_plans = cursor.fetchone()['total_plans']
+        
+        cursor.execute('SELECT COUNT(*) as total_checkins FROM daily_checkins')
+        total_checkins = cursor.fetchone()['total_checkins']
+        
+        admin_text = f"""
+👑 ПАНЕЛЬ АДМИНИСТРАТОРА
+
+📊 Статистика:
+• Пользователей: {total_users}
+• Создано планов: {total_plans}
+• Чек-инов: {total_checkins}
+• Сервис: {"🟢 Онлайн" if application else "🔴 Офлайн"}
+
+Доступные команды:
+/menu - Главное меню
+"""
+        await update.message.reply_text(admin_text)
+        
+    except Exception as e:
+        logger.error(f"❌ Error in admin command: {e}")
+        await update.message.reply_text("❌ Ошибка при получении статистики")
+    finally:
+        conn.close()
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик callback'ов"""
@@ -417,7 +535,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     data = query.data
-    logger.info(f"📨 Callback received: {data}")
+    logger.info(f"📨 Callback received: {data} from user {query.from_user.id}")
     
     try:
         if data == "create_plan":
@@ -430,6 +548,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await handle_my_plan(query, context)
         elif data == "help":
             await handle_help(query, context)
+        elif data == "admin":
+            await handle_admin_callback(query, context)
         elif data == "back_main":
             await show_main_menu(query)
         elif data.startswith("gender_"):
@@ -443,6 +563,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data == "checkin_history":
             await handle_checkin_history(query, context)
         else:
+            logger.warning(f"⚠️ Unknown callback data: {data}")
             await query.edit_message_text(
                 "❌ Неизвестная команда",
                 reply_markup=menu.get_main_menu()
@@ -454,6 +575,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "❌ Произошла ошибка. Попробуйте снова.",
             reply_markup=menu.get_main_menu()
         )
+
+async def handle_admin_callback(query, context):
+    """Обработчик админских callback'ов"""
+    user_id = query.from_user.id
+    if not is_admin(user_id):
+        await query.edit_message_text("❌ У вас нет прав доступа")
+        return
+    
+    await admin_command(await _get_update_from_query(query), context)
+
+async def _get_update_from_query(query):
+    """Создает Update объект из query"""
+    return Update(update_id=query.id, callback_query=query)
 
 async def handle_create_plan(query, context):
     """Обработчик создания плана"""
@@ -565,8 +699,8 @@ async def handle_checkin_menu(query, context):
             "Отслеживайте ваш прогресс:\n"
             "• Вес\n"
             "• Обхват талии\n"
-            "• Самочувствие\n"
-            "• Качество сна\n\n"
+            "• Самочувствие (1-5)\n"
+            "• Качество сна (1-5)\n\n"
             "Выберите действие:",
             reply_markup=menu.get_checkin_menu()
         )
@@ -587,6 +721,9 @@ async def handle_checkin_data(query, context):
             "Введите данные в формате:\n"
             "Вес (кг), Обхват талии (см), Самочувствие (1-5), Сон (1-5)\n\n"
             "Пример: 75.5, 85, 4, 3\n\n"
+            "📊 Шкала оценок:\n"
+            "• Самочувствие: 1(плохо) - 5(отлично)\n"
+            "• Сон: 1(бессонница) - 5(отлично выспался)\n\n"
             "Для отмены нажмите /menu"
         )
         
@@ -612,13 +749,13 @@ async def handle_checkin_history(query, context):
             return
         
         stats_text = "📊 ИСТОРИЯ ВАШИХ ЧЕК-ИНОВ:\n\n"
-        for stat in stats:
-            date, weight, waist, wellbeing, sleep = stat
-            stats_text += f"📅 {date[:10]}\n"
-            stats_text += f"⚖️ Вес: {weight} кг\n"
-            stats_text += f"📏 Талия: {waist} см\n"
-            stats_text += f"😊 Самочувствие: {wellbeing}/5\n"
-            stats_text += f"😴 Сон: {sleep}/5\n\n"
+        for stat in stats[:5]:  # Показываем только последние 5 записей
+            date_str = stat['date'][:10] if isinstance(stat['date'], str) else stat['date'].strftime('%Y-%m-%d')
+            stats_text += f"📅 {date_str}\n"
+            stats_text += f"⚖️ Вес: {stat['weight']} кг\n"
+            stats_text += f"📏 Талия: {stat['waist_circumference']} см\n"
+            stats_text += f"😊 Самочувствие: {stat['wellbeing_score']}/5\n"
+            stats_text += f"😴 Сон: {stat['sleep_quality']}/5\n\n"
         
         await query.edit_message_text(
             stats_text,
@@ -646,12 +783,27 @@ async def handle_stats(query, context):
             )
             return
         
-        stats_text = "📊 ВАША СТАТИСТИКА\n\n"
+        # Анализ прогресса
+        if len(stats) >= 2:
+            latest_weight = stats[0]['weight']
+            oldest_weight = stats[-1]['weight']
+            weight_diff = latest_weight - oldest_weight
+            
+            if weight_diff < 0:
+                progress_text = f"📉 Потеря веса: {abs(weight_diff):.1f} кг"
+            elif weight_diff > 0:
+                progress_text = f"📈 Набор веса: {weight_diff:.1f} кг"
+            else:
+                progress_text = "⚖️ Вес стабилен"
+        else:
+            progress_text = "📈 Записей пока мало для анализа прогресса"
+        
+        stats_text = f"📊 ВАША СТАТИСТИКА\n\n{progress_text}\n\n"
         stats_text += "Последние записи:\n"
         
-        for i, stat in enumerate(stats[:5]):
-            date, weight, waist, wellbeing, sleep = stat
-            stats_text += f"📅 {date[:10]}: {weight} кг, талия {waist} см\n"
+        for i, stat in enumerate(stats[:3]):
+            date_str = stat['date'][:10] if isinstance(stat['date'], str) else stat['date'].strftime('%Y-%m-%d')
+            stats_text += f"📅 {date_str}: {stat['weight']} кг, талия {stat['waist_circumference']} см\n"
         
         await query.edit_message_text(
             stats_text,
@@ -686,7 +838,15 @@ async def handle_my_plan(query, context):
         plan_text += f"🎯 Цель: {user_data.get('goal', '')}\n"
         plan_text += f"🏃 Активность: {user_data.get('activity', '')}\n\n"
         
-        plan_text += f"💧 Рекомендации по воде: 1.5-2 литра в день"
+        # Показываем первый день плана
+        if plan.get('days'):
+            first_day = plan['days'][0]
+            plan_text += f"📅 {first_day['name']}:\n"
+            for meal in first_day.get('meals', [])[:3]:  # Показываем первые 3 приема пищи
+                plan_text += f"• {meal['time']} - {meal['name']}\n"
+            plan_text += f"\n🍽️ Всего приемов пищи: 5 в день"
+        
+        plan_text += f"\n\n💧 Рекомендации: 1.5-2 литра воды в день"
         
         await query.edit_message_text(
             plan_text,
@@ -706,20 +866,32 @@ async def handle_help(query, context):
 ❓ ПОМОЩЬ ПО БОТУ
 
 📊 СОЗДАТЬ ПЛАН:
-• Создает персонализированный план питания
-• Учитывает ваш пол, цель, активность
-• Доступен раз в 7 дней
+• Создает персонализированный план питания на 7 дней
+• Учитывает ваш пол, цель, активность и параметры
+• Доступен раз в 7 дней (админам - безлимитно)
 
 📈 ЧЕК-ИН:
 • Ежедневное отслеживание прогресса
-• Запись веса, обхвата талии
-• Просмотр истории
+• Запись веса, обхвата талии, самочувствия
+• Просмотр истории и статистики
 
 📊 СТАТИСТИКА:
-• Анализ вашего прогресса
+• Анализ вашего прогресса  
+• Графики изменений параметров
 
 📋 МОЙ ПЛАН:
 • Просмотр текущего плана питания
+• Рекомендации и списки покупок
+
+💡 Советы:
+• Вводите данные точно
+• Следуйте плану питания
+• Регулярно делайте чек-ин
+• Пейте достаточное количество воды
+
+👑 АДМИН:
+• Статистика использования бота
+• Мониторинг состояния системы
 """
     await query.edit_message_text(
         help_text,
@@ -736,7 +908,7 @@ async def show_main_menu(query):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик текстовых сообщений"""
     try:
-        text = update.message.text
+        text = update.message.text.strip()
         user_id = update.effective_user.id
         
         if text == "/menu":
@@ -788,11 +960,15 @@ async def process_plan_details(update: Update, context: ContextTypes.DEFAULT_TYP
             'username': update.effective_user.username
         }
         
-        # Создаем простой план
+        processing_msg = await update.message.reply_text("🔄 Создаем ваш персональный план питания...")
+        
+        # Создаем план
         plan_data = generate_simple_plan(user_data)
         if plan_data:
             plan_id = save_plan(user_data['user_id'], plan_data)
             update_user_limit(user_data['user_id'])
+            
+            await processing_msg.delete()
             
             success_text = f"""
 🎉 ВАШ ПЛАН ПИТАНИЯ ГОТОВ!
@@ -805,11 +981,22 @@ async def process_plan_details(update: Update, context: ContextTypes.DEFAULT_TYP
 • 7 дней питания
 • 5 приемов пищи в день  
 • Сбалансированное питание
+• Рекомендации по воде
 
 План сохранен в вашем профиле!
+Используйте кнопку "МОЙ ПЛАН" для просмотра.
 """
             await update.message.reply_text(
                 success_text,
+                reply_markup=menu.get_main_menu()
+            )
+            
+            logger.info(f"✅ Plan successfully created for user {user_data['user_id']}")
+            
+        else:
+            await processing_msg.delete()
+            await update.message.reply_text(
+                "❌ Не удалось создать план. Попробуйте позже.",
                 reply_markup=menu.get_main_menu()
             )
         
@@ -864,6 +1051,8 @@ async def process_checkin_data(update: Update, context: ContextTypes.DEFAULT_TYP
 📏 Талия: {waist} см
 😊 Самочувствие: {wellbeing}/5
 😴 Сон: {sleep}/5
+
+Продолжайте отслеживать ваш прогресс!
 """
         await update.message.reply_text(
             success_text,
@@ -892,53 +1081,84 @@ async def process_checkin_data(update: Update, context: ContextTypes.DEFAULT_TYP
 
 def generate_simple_plan(user_data):
     """Создает простой план питания"""
-    plan = {
-        'user_data': user_data,
-        'days': [],
-        'created_at': datetime.now().isoformat()
-    }
-    
-    day_names = ['ПОНЕДЕЛЬНИК', 'ВТОРНИК', 'СРЕДА', 'ЧЕТВЕРГ', 'ПЯТНИЦА', 'СУББОТА', 'ВОСКРЕСЕНЬЕ']
-    
-    for day_name in day_names:
-        day = {
-            'name': day_name,
-            'meals': [
-                {
-                    'type': 'ЗАВТРАК',
-                    'name': 'Овсяная каша с фруктами',
-                    'time': '8:00',
-                    'calories': '350 ккал'
-                },
-                {
-                    'type': 'ПЕРЕКУС 1', 
-                    'name': 'Йогурт с орехами',
-                    'time': '11:00',
-                    'calories': '250 ккал'
-                },
-                {
-                    'type': 'ОБЕД',
-                    'name': 'Куриная грудка с гречкой',
-                    'time': '13:00', 
-                    'calories': '450 ккал'
-                },
-                {
-                    'type': 'ПЕРЕКУС 2',
-                    'name': 'Фруктовый салат',
-                    'time': '16:00',
-                    'calories': '200 ккал'
-                },
-                {
-                    'type': 'УЖИН',
-                    'name': 'Рыба с овощами',
-                    'time': '19:00',
-                    'calories': '400 ккал'
-                }
-            ]
+    try:
+        plan = {
+            'user_data': user_data,
+            'days': [],
+            'shopping_list': "Куриная грудка, рыба, овощи, фрукты, крупы, яйца, творог, молоко",
+            'water_regime': "1.5-2 литра воды в день",
+            'general_recommendations': "Сбалансированное питание и регулярная физическая активность",
+            'created_at': datetime.now().isoformat()
         }
-        plan['days'].append(day)
-    
-    return plan
+        
+        day_names = ['ПОНЕДЕЛЬНИК', 'ВТОРНИК', 'СРЕДА', 'ЧЕТВЕРГ', 'ПЯТНИЦА', 'СУББОТА', 'ВОСКРЕСЕНЬЕ']
+        meal_templates = [
+            {'type': 'ЗАВТРАК', 'time': '8:00', 'base_calories': 350},
+            {'type': 'ПЕРЕКУС 1', 'time': '11:00', 'base_calories': 250},
+            {'type': 'ОБЕД', 'time': '13:00', 'base_calories': 450},
+            {'type': 'ПЕРЕКУС 2', 'time': '16:00', 'base_calories': 200},
+            {'type': 'УЖИН', 'time': '19:00', 'base_calories': 400}
+        ]
+        
+        meal_names = {
+            'ЗАВТРАК': ['Овсяная каша с фруктами', 'Творог с ягодами', 'Яичница с овощами', 'Гречневая каша'],
+            'ПЕРЕКУС 1': ['Йогурт с орехами', 'Фруктовый салат', 'Протеиновый коктейль', 'Творожная запеканка'],
+            'ОБЕД': ['Куриная грудка с гречкой', 'Рыба с рисом', 'Индейка с овощами', 'Тефтели с пастой'],
+            'ПЕРЕКУС 2': ['Фруктовый салат', 'Орехи и сухофрукты', 'Сэндвич с авокадо', 'Йогурт'],
+            'УЖИН': ['Рыба с овощами', 'Курица с салатом', 'Творог', 'Омлет с зеленью']
+        }
+        
+        for day_name in day_names:
+            day_calories = 0
+            meals = []
+            
+            for meal_template in meal_templates:
+                meal_type = meal_template['type']
+                meal_name = meal_names[meal_type][hash(f"{day_name}{meal_type}") % len(meal_names[meal_type])]
+                calories = meal_template['base_calories']
+                day_calories += calories
+                
+                meal = {
+                    'type': meal_type,
+                    'name': meal_name,
+                    'time': meal_template['time'],
+                    'calories': f"{calories} ккал"
+                }
+                meals.append(meal)
+            
+            day = {
+                'name': day_name,
+                'meals': meals,
+                'total_calories': f"{day_calories} ккал"
+            }
+            plan['days'].append(day)
+        
+        logger.info(f"✅ Plan generated for user {user_data['user_id']}")
+        return plan
+        
+    except Exception as e:
+        logger.error(f"❌ Error generating plan: {e}")
+        return None
+
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик ошибок"""
+    try:
+        logger.error(f"❌ Exception while handling update: {context.error}")
+        
+        # Логируем дополнительную информацию
+        if update:
+            logger.error(f"Update: {update}")
+        if context:
+            logger.error(f"Context: {context}")
+            
+        # Отправляем сообщение пользователю
+        if update and update.effective_message:
+            await update.effective_message.reply_text(
+                "❌ Произошла непредвиденная ошибка. Попробуйте позже.",
+                reply_markup=menu.get_main_menu()
+            )
+    except Exception as e:
+        logger.error(f"Error in error handler: {e}")
 
 # ==================== WEBHOOK ROUTES ====================
 
@@ -948,15 +1168,34 @@ def home():
     <h1>🤖 Nutrition Bot is Running!</h1>
     <p>Бот для создания персональных планов питания</p>
     <p><a href="/health">Health Check</a></p>
+    <p><a href="/ping">Ping</a></p>
     <p>🕒 Last update: {}</p>
-    """.format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    <p>🔧 Mode: {}</p>
+    """.format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
+               "WEBHOOK" if Config.WEBHOOK_URL and not Config.RENDER else "POLLING")
 
 @app.route('/health')
 def health_check():
     return jsonify({
         "status": "healthy", 
         "service": "nutrition-bot",
-        "timestamp": datetime.now().isoformat()
+        "timestamp": datetime.now().isoformat(),
+        "bot_status": "running" if application else "stopped",
+        "mode": "webhook" if Config.WEBHOOK_URL and not Config.RENDER else "polling"
+    })
+
+@app.route('/ping')
+def ping():
+    return "pong 🏓"
+
+@app.route('/status')
+def status():
+    return jsonify({
+        "status": "operational",
+        "service": "nutrition-bot",
+        "timestamp": datetime.now().isoformat(),
+        "version": "2.0",
+        "environment": "production"
     })
 
 @app.route('/webhook', methods=['POST'])
@@ -977,24 +1216,26 @@ def webhook():
 def set_webhook():
     """Установка webhook"""
     try:
-        if application and Config.WEBHOOK_URL:
+        if application and Config.WEBHOOK_URL and not Config.RENDER:
             webhook_url = f"{Config.WEBHOOK_URL}/webhook"
             
-            # Используем asyncio для вызова асинхронной функции
+            # Используем отдельный event loop для webhook
             async def set_webhook_async():
                 await application.bot.set_webhook(webhook_url)
+                return True
+                
+            success = asyncio.run(set_webhook_async())
             
-            asyncio.run(set_webhook_async())
-            
-            return jsonify({
-                "status": "success", 
-                "message": "Webhook set successfully",
-                "webhook_url": webhook_url
-            })
+            if success:
+                return jsonify({
+                    "status": "success", 
+                    "message": "Webhook set successfully",
+                    "webhook_url": webhook_url
+                })
         else:
             return jsonify({
                 "status": "info", 
-                "message": "WEBHOOK_URL not set or application not initialized"
+                "message": "Using polling mode (Render environment)"
             })
     except Exception as e:
         logger.error(f"❌ Webhook setup error: {e}")
@@ -1002,23 +1243,59 @@ def set_webhook():
 
 # ==================== ЗАПУСК ПРИЛОЖЕНИЯ ====================
 
+def run_polling():
+    """Запуск бота в режиме polling"""
+    try:
+        logger.info("🤖 Starting bot in POLLING mode...")
+        application.run_polling(
+            drop_pending_updates=True,
+            allowed_updates=Update.ALL_TYPES,
+            close_loop=False
+        )
+    except Exception as e:
+        logger.error(f"❌ Polling error: {e}")
+        raise
+
 def main():
     """Основная функция запуска"""
-    # Инициализация бота
-    if not init_bot():
-        logger.error("❌ Failed to initialize bot. Exiting.")
-        return
-    
-    # Настройка webhook
     try:
-        asyncio.run(setup_webhook())
+        logger.info("🚀 Starting Nutrition Bot...")
+        
+        # Инициализация бота
+        if not init_bot():
+            logger.error("❌ Failed to initialize bot. Exiting.")
+            return
+        
+        # Настройка webhook (только если не на Render)
+        if Config.WEBHOOK_URL and not Config.RENDER:
+            try:
+                asyncio.run(setup_webhook())
+            except Exception as e:
+                logger.error(f"❌ Webhook setup failed, falling back to polling: {e}")
+        
+        # Запуск keep-alive service
+        keep_alive_service.start()
+        
+        # Запуск Flask приложения в отдельном потоке
+        def run_flask():
+            port = int(os.environ.get('PORT', Config.PORT))
+            logger.info(f"🌐 Starting Flask app on port {port}")
+            app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+        
+        flask_thread = threading.Thread(target=run_flask, daemon=True)
+        flask_thread.start()
+        
+        # Запуск бота в режиме polling
+        run_polling()
+        
+    except KeyboardInterrupt:
+        logger.info("🛑 Bot stopped by user")
     except Exception as e:
-        logger.error(f"❌ Webhook setup failed: {e}")
-    
-    # Запуск Flask приложения
-    logger.info(f"🚀 Starting Flask app on port {Config.PORT}")
-    port = int(os.environ.get('PORT', Config.PORT))
-    app.run(host='0.0.0.0', port=port, debug=False)
+        logger.error(f"❌ Fatal error: {e}")
+    finally:
+        logger.info("🧹 Cleaning up...")
+        keep_alive_service.stop()
+        logger.info("👋 Bot shutdown complete")
 
 if __name__ == "__main__":
     main()
