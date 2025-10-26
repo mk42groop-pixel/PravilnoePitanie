@@ -4,6 +4,7 @@ import re
 import logging
 import asyncio
 import time
+import requests
 from typing import Dict, Any, List, Tuple
 from dotenv import load_dotenv
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InputFile
@@ -114,7 +115,7 @@ class NutritionProfessor:
             {"time": "08:30", "amount": 200, "description": "После завтрака - способствует пищеварению"},
             {"time": "10:00", "amount": 200, "description": "Между завтраком и перекусом - поддержание гидратации"},
             {"time": "11:30", "amount": 200, "description": "Перед обедом - подготовка ЖКТ к приему пищи"},
-            {"time": "13:30", "amount": 200, "description": "После обед - через 30 минут после еды"},
+            {"time": "13:30", "amount": 200, "description": "После обеда - через 30 минут после еды"},
             {"time": "15:00", "amount": 200, "description": "Во второй половине дня - поддержание энергии"},
             {"time": "17:00", "amount": 200, "description": "Перед ужином - снижение аппетита"},
             {"time": "19:00", "amount": 200, "description": "После ужина - завершение дневной нормы"}
@@ -206,7 +207,7 @@ class NutritionProfessor:
                     {{"time": "08:30", "amount": 200, "description": "После завтрака"}}
                 ],
                 "general_recommendations": [
-                    "Пейте воду за 30 минут до еда",
+                    "Пейте воду за 30 минут до еды",
                     "Не пейте во время приема пищи",
                     "Увеличьте потребление при физических нагрузках"
                 ]
@@ -1155,36 +1156,35 @@ def index():
 def health():
     return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()})
 
-async def cleanup_webhook():
-    """Очистка вебхука перед любым запуском"""
+async def setup_webhook():
+    """Настройка вебхука"""
     try:
+        # Удаляем существующий вебхук
         await application.bot.delete_webhook()
-        print("✅ Вебхуки очищены")
+        print("✅ Старый вебхук удален")
+        
+        # Устанавливаем новый вебхук
+        await application.bot.set_webhook(f"{WEBHOOK_URL}/webhook")
+        print(f"✅ Новый вебхук установлен: {WEBHOOK_URL}/webhook")
         return True
     except Exception as e:
-        print(f"⚠️ Ошибка очистки вебхуков: {e}")
+        print(f"❌ Ошибка настройки вебхука: {e}")
         return False
 
-def run_production():
-    """Продакшен режим с вебхуком"""
+def run_webhook():
+    """Запуск через вебхук"""
     port = int(os.environ.get('PORT', 5000))
     
-    async def setup_production():
-        await cleanup_webhook()
-        await application.bot.set_webhook(f"{WEBHOOK_URL}/webhook")
-        print(f"🚀 Production: Вебхук установлен на {WEBHOOK_URL}/webhook")
+    # Настраиваем вебхук
+    asyncio.run(setup_webhook())
     
-    asyncio.run(setup_production())
-    print(f"🌐 Запуск Flask сервера на порту {port}")
+    # Запускаем Flask
+    print(f"🚀 Запускаем Flask сервер на порту {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
 
-def run_development():
-    """Режим разработки с polling"""
-    async def setup_development():
-        await cleanup_webhook()
-        print("🔍 Development: Запуск в режиме polling...")
-    
-    asyncio.run(setup_development())
+def run_polling():
+    """Запуск через polling"""
+    print("🔍 Запуск в режиме polling...")
     application.run_polling()
 
 if __name__ == '__main__':
@@ -1194,6 +1194,6 @@ if __name__ == '__main__':
     has_webhook_url = bool(WEBHOOK_URL)
     
     if is_render or is_webhook_env or has_webhook_url:
-        run_production()
+        run_webhook()
     else:
-        run_development()
+        run_polling()
