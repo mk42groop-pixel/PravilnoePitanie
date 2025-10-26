@@ -2,7 +2,7 @@ import os
 import json
 import re
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple
 from dotenv import load_dotenv
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
@@ -10,6 +10,7 @@ from flask import Flask, request
 import requests
 import asyncio
 from threading import Thread
+from datetime import datetime
 
 load_dotenv()
 
@@ -24,10 +25,13 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 YANDEX_FOLDER_ID = os.getenv('YANDEX_FOLDER_ID')
 YANDEX_API_KEY = os.getenv('YANDEX_API_KEY')
-WEBHOOK_URL = os.getenv('WEBHOOK_URL')  # Ваш URL для вебхука
+WEBHOOK_URL = os.getenv('WEBHOOK_URL')
 
 # Состояния беседы
-GOAL, DIET, ALLERGIES, GENDER, AGE, HEIGHT, WEIGHT, ACTIVITY, GENERATING = range(9)
+(
+    START, GOAL, DIET, ALLERGIES, GENDER, AGE, HEIGHT, WEIGHT, ACTIVITY,
+    CONFIRMATION, EDIT_PARAMS, GENERATING
+) = range(12)
 
 class NutritionProfessor:
     def __init__(self):
@@ -98,11 +102,43 @@ class NutritionProfessor:
             'carbs': round(carbs)
         }
     
+    def calculate_water_intake(self, weight: int) -> Dict[str, Any]:
+        """Расчет водного режима (30-40 мл на 1 кг веса)"""
+        min_water = weight * 30  # минимальная норма
+        max_water = weight * 40  # максимальная норма
+        avg_water = (min_water + max_water) // 2
+        
+        # График приема воды в течение дня (8 приемов)
+        water_schedule = [
+            {"time": "07:00", "amount": 250, "description": "Стакан теплой воды натощак для запуска метаболизма"},
+            {"time": "08:30", "amount": 200, "description": "После завтрака - способствует пищеварению"},
+            {"time": "10:00", "amount": 200, "description": "Между завтраком и перекусом - поддержание гидратации"},
+            {"time": "11:30", "amount": 200, "description": "Перед обедом - подготовка ЖКТ к приему пищи"},
+            {"time": "13:30", "amount": 200, "description": "После обеда - через 30 минут после еды"},
+            {"time": "15:00", "amount": 200, "description": "Во второй половине дня - поддержание энергии"},
+            {"time": "17:00", "amount": 200, "description": "Перед ужином - снижение аппетита"},
+            {"time": "19:00", "amount": 200, "description": "После ужина - завершение дневной нормы"}
+        ]
+        
+        return {
+            "min_water": min_water,
+            "max_water": max_water,
+            "avg_water": avg_water,
+            "schedule": water_schedule,
+            "recommendations": [
+                "Пейте воду комнатной температуры",
+                "Не пейте во время еды - только за 30 минут до и через 1 час после",
+                "Увеличьте потребление воды при физических нагрузках",
+                "Ограничьте потребление жидкости за 2 часа до сна"
+            ]
+        }
+    
     def create_professor_prompt(self, user_data: Dict[str, Any]) -> str:
         """Создание промпта для профессора нутрициологии"""
         calories = self.calculate_calories(user_data)
         bju = self.calculate_bju(user_data, calories)
         bmi = self.calculate_bmi(int(user_data['height']), int(user_data['weight']))
+        water = self.calculate_water_intake(int(user_data['weight']))
         
         return f"""
         Ты профессор нутрициологии с 40-летним опытом. Составь индивидуальный план питания на 7 дней.
@@ -121,6 +157,7 @@ class NutritionProfessor:
         РАСЧЕТНЫЕ ПОКАЗАТЕЛИ:
         - Суточная норма калорий: {calories} ккал
         - Рекомендуемое БЖУ: {bju['protein']}г белка, {bju['fat']}г жиров, {bju['carbs']}г углеводов
+        - Норма воды: {water['avg_water']} мл в день
 
         ТРЕБОВАНИЯ К ПЛАНУ:
         1. 5 приемов пищи ежедневно: завтрак, перекус, обед, перекус, ужин
@@ -129,6 +166,7 @@ class NutritionProfessor:
         4. Разнообразие блюд без повторений в течение недели
         5. Практическая реализуемость рецептов
         6. Учет диетических ограничений и аллергий
+        7. Включи рекомендации по водному режиму
 
         ФОРМАТ ОТВЕТА - STRICT JSON:
         {{
@@ -142,7 +180,8 @@ class NutritionProfessor:
                     "ingredients": [
                         {{"name": "ингредиент", "quantity": 100, "unit": "гр"}}
                     ],
-                    "recipe": "Подробный рецепт приготовления"
+                    "recipe": "Подробный рецепт приготовления",
+                    "water_recommendation": "Выпейте стакан воды за 30 минут до еды"
                 }},
                 "перекус": {{...}},
                 "обед": {{...}},
@@ -151,14 +190,27 @@ class NutritionProfessor:
                 "total_calories": {calories},
                 "total_protein": {bju['protein']},
                 "total_carbs": {bju['carbs']},
-                "total_fat": {bju['fat']}
+                "total_fat": {bju['fat']},
+                "water_notes": "Рекомендации по водному режиму на день"
             }},
             "вторник": {{...}},
             "среда": {{...}},
             "четверг": {{...}},
             "пятница": {{...}},
             "суббота": {{...}},
-            "воскресенье": {{...}}
+            "воскресенье": {{...}},
+            "water_regime": {{
+                "daily_total": {water['avg_water']},
+                "schedule": [
+                    {{"time": "07:00", "amount": 250, "description": "Стакан теплой воды натощак"}},
+                    {{"time": "08:30", "amount": 200, "description": "После завтрака"}}
+                ],
+                "general_recommendations": [
+                    "Пейте воду за 30 минут до еды",
+                    "Не пейте во время приема пищи",
+                    "Увеличьте потребление при физических нагрузках"
+                ]
+            }}
         }}
 
         Соблюдай общую калорийность {calories} ±100 ккал в день и баланс БЖУ.
@@ -189,7 +241,7 @@ class YandexGPTClient:
             "messages": [
                 {
                     "role": "system",
-                    "text": "Ты профессор нутрициологии с 40-летним опытом."
+                    "text": "Ты профессор нутрициологии с 40-летним опытом. Составляешь индивидуальные планы питания."
                 },
                 {
                     "role": "user",
@@ -235,6 +287,9 @@ class NutritionPlanParser:
     
     def _create_fallback_plan(self, user_data: Dict[str, Any]) -> Dict[str, Any]:
         """Создание резервного плана питания"""
+        professor = NutritionProfessor()
+        water = professor.calculate_water_intake(int(user_data['weight']))
+        
         plan = {}
         for day in ['понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота', 'воскресенье']:
             plan[day] = {
@@ -246,8 +301,11 @@ class NutritionPlanParser:
                 'total_calories': 2000,
                 'total_protein': 100,
                 'total_carbs': 250,
-                'total_fat': 65
+                'total_fat': 65,
+                'water_notes': 'Пейте воду за 30 минут до каждого приема пищи'
             }
+        
+        plan['water_regime'] = water
         return plan
     
     def _create_fallback_meal(self, meal_type: str) -> Dict[str, Any]:
@@ -267,7 +325,8 @@ class NutritionPlanParser:
             'carbs': 40,
             'fat': 10,
             'ingredients': [{'name': 'продукт', 'quantity': 100, 'unit': 'гр'}],
-            'recipe': 'Рецепт приготовления блюда'
+            'recipe': 'Рецепт приготовления блюда',
+            'water_recommendation': 'Выпейте стакан воды за 30 минут до еды'
         }
 
 class NutritionValidator:
@@ -302,9 +361,10 @@ class NutritionValidator:
         
         try:
             for day in plan.values():
-                day_calories = day.get('total_calories', 0)
-                if abs(day_calories - target_calories) > tolerance:
-                    return False
+                if isinstance(day, dict) and 'total_calories' in day:
+                    day_calories = day.get('total_calories', 0)
+                    if abs(day_calories - target_calories) > tolerance:
+                        return False
             return True
         except:
             return False
@@ -314,9 +374,12 @@ class ShoppingListGenerator:
         """Генерация списка покупок"""
         shopping_list = {}
         
-        for day in nutrition_plan.values():
+        for day_name, day_data in nutrition_plan.items():
+            if day_name == 'water_regime':
+                continue
+                
             for meal_type in ['завтрак', 'перекус', 'обед', 'перекус', 'ужин']:
-                meal = day[meal_type]
+                meal = day_data[meal_type]
                 ingredients = meal.get('ingredients', [])
                 self._aggregate_ingredients(shopping_list, ingredients)
         
@@ -359,16 +422,18 @@ class ShoppingListGenerator:
             'Молочные продукты': [],
             'Крупы и злаки': [],
             'Бакалея': [],
+            'Напитки': [],
             'Прочее': []
         }
         
         category_keywords = {
-            'Овощи и фрукты': ['помидор', 'огурец', 'яблоко', 'банан', 'апельсин', 'морковь', 'лук', 'картофель', 'капуста', 'салат', 'зелень'],
-            'Мясо и птица': ['куриц', 'говядин', 'свинин', 'индейк', 'фарш', 'грудк', 'мясо'],
-            'Рыба и морепродукты': ['рыба', 'лосось', 'тунец', 'креветк', 'кальмар', 'миди'],
-            'Молочные продукты': ['молоко', 'йогурт', 'творог', 'сыр', 'кефир', 'сметана', 'масло сливочное'],
-            'Крупы и злаки': ['рис', 'гречк', 'овсян', 'пшено', 'макарон', 'хлеб', 'мука'],
-            'Бакалея': ['масло оливковое', 'масло растительное', 'соль', 'сахар', 'перец', 'специи', 'соус']
+            'Овощи и фрукты': ['помидор', 'огурец', 'яблоко', 'банан', 'апельсин', 'морковь', 'лук', 'картофель', 'капуста', 'салат', 'зелень', 'ягода'],
+            'Мясо и птица': ['куриц', 'говядин', 'свинин', 'индейк', 'фарш', 'грудк', 'мясо', 'телятин'],
+            'Рыба и морепродукты': ['рыба', 'лосось', 'тунец', 'креветк', 'кальмар', 'миди', 'треска', 'окунь'],
+            'Молочные продукты': ['молоко', 'йогурт', 'творог', 'сыр', 'кефир', 'сметана', 'масло сливочное', 'ряженка'],
+            'Крупы и злаки': ['рис', 'гречк', 'овсян', 'пшено', 'макарон', 'хлеб', 'мука', 'крупа', 'отруб'],
+            'Бакалея': ['масло оливковое', 'масло растительное', 'соль', 'сахар', 'перец', 'специи', 'соус', 'уксус', 'мед'],
+            'Напитки': ['вода', 'чай', 'кофе', 'сок', 'компот', 'морс']
         }
         
         for item_key, item_data in shopping_list.items():
@@ -392,6 +457,7 @@ class FileExporter:
         self._export_nutrition_plan(nutrition_plan, user_id)
         self._export_shopping_list(shopping_list, user_id)
         self._export_recipes(nutrition_plan, user_id)
+        self._export_water_regime(nutrition_plan, user_id)
     
     def _export_nutrition_plan(self, plan: Dict[str, Any], user_id: int):
         """Экспорт плана питания"""
@@ -400,8 +466,11 @@ class FileExporter:
             f.write("🎯 ИНДИВИДУАЛЬНЫЙ ПЛАН ПИТАНИЯ ОТ ПРОФЕССОРА НУТРИЦИОЛОГИИ\n\n")
             
             for day, meals_data in plan.items():
+                if day == 'water_regime':
+                    continue
+                    
                 f.write(f"📅 {day.upper()}\n")
-                f.write("=" * 50 + "\n")
+                f.write("=" * 60 + "\n")
                 
                 total_day_calories = 0
                 total_day_protein = 0
@@ -413,6 +482,8 @@ class FileExporter:
                     f.write(f"\n🍽️ {meal_type.upper()}: {meal['name']}\n")
                     f.write(f"   🔥 Калории: {meal['calories']} ккал\n")
                     f.write(f"   🥚 Белки: {meal['protein']}г | 🥑 Жиры: {meal['fat']}г | 🌾 Углеводы: {meal['carbs']}г\n")
+                    if 'water_recommendation' in meal:
+                        f.write(f"   💧 {meal['water_recommendation']}\n")
                     
                     total_day_calories += meal['calories']
                     total_day_protein += meal['protein']
@@ -422,7 +493,9 @@ class FileExporter:
                 f.write(f"\n📊 ИТОГИ ДНЯ:\n")
                 f.write(f"   🔥 Общие калории: {total_day_calories} ккал\n")
                 f.write(f"   🥚 Белки: {total_day_protein}г | 🥑 Жиры: {total_day_fat}г | 🌾 Углеводы: {total_day_carbs}г\n")
-                f.write("\n" + "=" * 50 + "\n\n")
+                if 'water_notes' in meals_data:
+                    f.write(f"   💧 {meals_data['water_notes']}\n")
+                f.write("\n" + "=" * 60 + "\n\n")
     
     def _export_shopping_list(self, shopping_list: Dict[str, Any], user_id: int):
         """Экспорт списка покупок"""
@@ -444,21 +517,59 @@ class FileExporter:
             f.write("👨‍🍳 РЕЦЕПТЫ ОТ ПРОФЕССОРА НУТРИЦИОЛОГИИ\n\n")
             
             for day, meals_data in plan.items():
+                if day == 'water_regime':
+                    continue
+                    
                 f.write(f"📅 {day.upper()}\n")
-                f.write("=" * 60 + "\n")
+                f.write("=" * 70 + "\n")
                 
                 for meal_type in ['завтрак', 'перекус', 'обед', 'перекус', 'ужин']:
                     meal = meals_data[meal_type]
                     f.write(f"\n🍽️ {meal_type.upper()}: {meal['name']}\n")
                     f.write(f"📝 Рецепт: {meal['recipe']}\n")
+                    if 'water_recommendation' in meal:
+                        f.write(f"💧 Рекомендация: {meal['water_recommendation']}\n")
                     f.write("📋 Ингредиенты:\n")
                     
                     for ingredient in meal.get('ingredients', []):
                         f.write(f"   • {ingredient['name']}: {ingredient['quantity']} {ingredient.get('unit', 'гр')}\n")
                     
-                    f.write("\n" + "-" * 40 + "\n")
+                    f.write("\n" + "-" * 50 + "\n")
                 
                 f.write("\n")
+    
+    def _export_water_regime(self, plan: Dict[str, Any], user_id: int):
+        """Экспорт водного режима"""
+        if 'water_regime' not in plan:
+            return
+            
+        water = plan['water_regime']
+        filename = f"water_regime_{user_id}.txt"
+        with open(filename, 'w', encoding='utf-8') as f:
+            f.write("💧 ВОДНЫЙ РЕЖИМ ОТ ПРОФЕССОРА НУТРИЦИОЛОГИИ\n\n")
+            
+            f.write(f"📊 СУТОЧНАЯ НОРМА ВОДЫ:\n")
+            f.write(f"   • Минимальная: {water['min_water']} мл\n")
+            f.write(f"   • Рекомендуемая: {water['avg_water']} мл\n")
+            f.write(f"   • Максимальная: {water['max_water']} мл\n\n")
+            
+            f.write("🕒 ГРАФИК ПРИЕМА ВОДЫ В ТЕЧЕНИЕ ДНЯ:\n")
+            for schedule in water['schedule']:
+                f.write(f"   ⏰ {schedule['time']} - {schedule['amount']} мл\n")
+                f.write(f"      {schedule['description']}\n")
+            f.write("\n")
+            
+            f.write("💡 ОБЩИЕ РЕКОМЕНДАЦИИ:\n")
+            for i, recommendation in enumerate(water['recommendations'], 1):
+                f.write(f"   {i}. {recommendation}\n")
+            f.write("\n")
+            
+            f.write("📝 ВАЖНЫЕ ПРИНЦИПЫ:\n")
+            f.write("   • Пейте воду за 30 минут ДО еды\n")
+            f.write("   • Не пейте во время приема пищи\n")
+            f.write("   • Пейте через 1 час ПОСЛЕ еды\n")
+            f.write("   • Увеличьте норму при физических нагрузках\n")
+            f.write("   • Ограничьте жидкость за 2 часа до сна\n")
 
 # Инициализация классов
 nutrition_professor = NutritionProfessor()
@@ -470,117 +581,224 @@ file_exporter = FileExporter()
 # Создание приложения Telegram
 application = Application.builder().token(BOT_TOKEN).build()
 
+def get_progress_text(user_data: Dict[str, Any], current_step: str = None) -> str:
+    """Генерация текста с прогрессом и параметрами"""
+    progress = "📊 ВВЕДЕННЫЕ ПАРАМЕТРЫ:\n"
+    
+    steps = {
+        'goal': '🎯 Цель',
+        'diet': '🥗 Тип диеты', 
+        'allergies': '⚠️ Аллергии',
+        'gender': '👤 Пол',
+        'age': '🎂 Возраст',
+        'height': '📏 Рост',
+        'weight': '⚖️ Вес',
+        'activity': '🏃‍♂️ Активность'
+    }
+    
+    for key, description in steps.items():
+        if key in user_data:
+            value = user_data[key]
+            if current_step == key:
+                progress += f"   {description}: {value} ✅\n"
+            else:
+                progress += f"   {description}: {value}\n"
+        else:
+            if current_step == key:
+                progress += f"   {description}: ... 🔄\n"
+            else:
+                progress += f"   {description}: ❌\n"
+    
+    return progress
+
+def create_goal_keyboard(show_back: bool = False):
+    """Клавиатура для выбора цели"""
+    keyboard = [["похудение", "поддержание веса"], ["набор мышечной массы"]]
+    if show_back:
+        keyboard.append(["◀️ Назад"])
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+def create_diet_keyboard(show_back: bool = False):
+    """Клавиатура для выбора типа диеты"""
+    keyboard = [["стандарт", "вегетарианская"], ["веганская", "безглютеновая"], ["низкоуглеводная"]]
+    if show_back:
+        keyboard.append(["◀️ Назад"])
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+def create_allergies_keyboard(show_back: bool = False):
+    """Клавиатура для выбора аллергий"""
+    keyboard = [["нет", "орехи"], ["молочные продукты", "яйца"], ["рыба/морепродукты"]]
+    if show_back:
+        keyboard.append(["◀️ Назад"])
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+def create_gender_keyboard(show_back: bool = False):
+    """Клавиатура для выбора пола"""
+    keyboard = [["мужской", "женский"]]
+    if show_back:
+        keyboard.append(["◀️ Назад"])
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+def create_activity_keyboard(show_back: bool = False):
+    """Клавиатура для выбора уровня активности"""
+    keyboard = [["сидячий", "умеренная"], ["активный", "очень активный"]]
+    if show_back:
+        keyboard.append(["◀️ Назад"])
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+def create_confirmation_keyboard():
+    """Клавиатура для подтверждения параметров"""
+    keyboard = [["✅ Да, все верно", "✏️ Редактировать параметры"]]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+def create_edit_keyboard():
+    """Клавиатура для редактирования параметров"""
+    keyboard = [
+        ["🎯 Цель", "🥗 Тип диеты"],
+        ["⚠️ Аллергии", "👤 Пол"],
+        ["🎂 Возраст", "📏 Рост"],
+        ["⚖️ Вес", "🏃‍♂️ Активность"],
+        ["✅ Завершить редактирование"]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Начало работы с ботом"""
+    context.user_data.clear()
+    
     await update.message.reply_text(
         "👋 Добро пожаловать в бот профессора нутрициологии!\n\n"
-        "Я создам для вас индивидуальный план питания на 7 дней с учетом всех ваших параметров.\n\n"
-        "📝 Для начала выберите вашу цель:",
+        "Я создам для вас индивидуальный план питания на 7 дней с учетом:\n"
+        "• 🎯 Ваших целей и параметров\n"  
+        "• 🥗 Диетических предпочтений\n"
+        "• 💧 Водного режима\n"
+        "• 📊 Баланса БЖУ\n\n"
+        "Давайте начнем! Выберите вашу цель:",
         reply_markup=create_goal_keyboard()
     )
     return GOAL
 
-def create_goal_keyboard():
-    """Клавиатура для выбора цели"""
-    keyboard = [
-        ["похудение", "поддержание веса"],
-        ["набор мышечной массы"]
-    ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
-def create_diet_keyboard():
-    """Клавиатура для выбора типа диеты"""
-    keyboard = [
-        ["стандарт", "вегетарианская"],
-        ["веганская", "безглютеновая"],
-        ["низкоуглеводная"]
-    ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
-def create_allergies_keyboard():
-    """Клавиатура для выбора аллергий"""
-    keyboard = [
-        ["нет", "орехи"],
-        ["молочные продукты", "яйца"],
-        ["рыба/морепродукты"]
-    ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
-def create_gender_keyboard():
-    """Клавиатура для выбора пола"""
-    keyboard = [
-        ["мужской", "женский"]
-    ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
-def create_activity_keyboard():
-    """Клавиатура для выбора уровня активности"""
-    keyboard = [
-        ["сидячий", "умеренная"],
-        ["активный", "очень активный"]
-    ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
 async def process_goal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Обработка выбора цели"""
-    goal = update.message.text
-    if goal not in ['похудение', 'поддержание веса', 'набор мышечной массы']:
+    text = update.message.text
+    
+    if text == "◀️ Назад":
+        await update.message.reply_text(
+            "Начинаем заново! Выберите вашу цель:",
+            reply_markup=create_goal_keyboard()
+        )
+        return GOAL
+    
+    if text not in ['похудение', 'поддержание веса', 'набор мышечной массы']:
         await update.message.reply_text("Пожалуйста, выберите цель из предложенных вариантов:")
         return GOAL
     
-    context.user_data['goal'] = goal
+    context.user_data['goal'] = text
+    
+    progress_text = get_progress_text(context.user_data, 'goal')
     await update.message.reply_text(
-        "🥗 Выберите тип диеты:",
-        reply_markup=create_diet_keyboard()
+        f"{progress_text}\n\n"
+        "🥗 Теперь выберите тип диеты:",
+        reply_markup=create_diet_keyboard(show_back=True)
     )
     return DIET
 
 async def process_diet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Обработка выбора диеты"""
-    diet = update.message.text
-    if diet not in ['стандарт', 'вегетарианская', 'веганская', 'безглютеновая', 'низкоуглеводная']:
+    text = update.message.text
+    
+    if text == "◀️ Назад":
+        progress_text = get_progress_text(context.user_data, 'goal')
+        await update.message.reply_text(
+            f"{progress_text}\n\n"
+            "Выберите вашу цель:",
+            reply_markup=create_goal_keyboard(show_back=True)
+        )
+        return GOAL
+    
+    if text not in ['стандарт', 'вегетарианская', 'веганская', 'безглютеновая', 'низкоуглеводная']:
         await update.message.reply_text("Пожалуйста, выберите тип диеты из предложенных вариантов:")
         return DIET
     
-    context.user_data['diet'] = diet
+    context.user_data['diet'] = text
+    
+    progress_text = get_progress_text(context.user_data, 'diet')
     await update.message.reply_text(
+        f"{progress_text}\n\n"
         "⚠️ Есть ли у вас аллергии или непереносимости?",
-        reply_markup=create_allergies_keyboard()
+        reply_markup=create_allergies_keyboard(show_back=True)
     )
     return ALLERGIES
 
 async def process_allergies(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Обработка выбора аллергий"""
-    allergies = update.message.text
-    if allergies not in ['нет', 'орехи', 'молочные продукты', 'яйца', 'рыба/морепродукты']:
+    text = update.message.text
+    
+    if text == "◀️ Назад":
+        progress_text = get_progress_text(context.user_data, 'diet')
+        await update.message.reply_text(
+            f"{progress_text}\n\n"
+            "Выберите тип диеты:",
+            reply_markup=create_diet_keyboard(show_back=True)
+        )
+        return DIET
+    
+    if text not in ['нет', 'орехи', 'молочные продукты', 'яйца', 'рыба/морепродукты']:
         await update.message.reply_text("Пожалуйста, выберите вариант из предложенных:")
         return ALLERGIES
     
-    context.user_data['allergies'] = allergies
+    context.user_data['allergies'] = text
+    
+    progress_text = get_progress_text(context.user_data, 'allergies')
     await update.message.reply_text(
+        f"{progress_text}\n\n"
         "👤 Укажите ваш пол:",
-        reply_markup=create_gender_keyboard()
+        reply_markup=create_gender_keyboard(show_back=True)
     )
     return GENDER
 
 async def process_gender(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Обработка выбора пола"""
-    gender = update.message.text
-    if gender not in ['мужской', 'женский']:
+    text = update.message.text
+    
+    if text == "◀️ Назад":
+        progress_text = get_progress_text(context.user_data, 'allergies')
+        await update.message.reply_text(
+            f"{progress_text}\n\n"
+            "Выберите аллергии:",
+            reply_markup=create_allergies_keyboard(show_back=True)
+        )
+        return ALLERGIES
+    
+    if text not in ['мужской', 'женский']:
         await update.message.reply_text("Пожалуйста, выберите пол из предложенных вариантов:")
         return GENDER
     
-    context.user_data['gender'] = gender
+    context.user_data['gender'] = text
+    
+    progress_text = get_progress_text(context.user_data, 'gender')
     await update.message.reply_text(
-        "🎂 Укажите ваш возраст (полных лет):",
+        f"{progress_text}\n\n"
+        "🎂 Укажите ваш возраст (полных лет, от 10 до 100):",
         reply_markup=ReplyKeyboardRemove()
     )
     return AGE
 
 async def process_age(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Обработка возраста"""
+    text = update.message.text
+    
+    if text == "◀️ Назад":
+        progress_text = get_progress_text(context.user_data, 'gender')
+        await update.message.reply_text(
+            f"{progress_text}\n\n"
+            "Выберите пол:",
+            reply_markup=create_gender_keyboard(show_back=True)
+        )
+        return GENDER
+    
     try:
-        age = int(update.message.text)
+        age = int(text)
         if age < 10 or age > 100:
             await update.message.reply_text("Пожалуйста, введите реальный возраст (10-100 лет):")
             return AGE
@@ -589,13 +807,28 @@ async def process_age(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         return AGE
     
     context.user_data['age'] = age
-    await update.message.reply_text("📏 Укажите ваш рост (в см):")
+    
+    progress_text = get_progress_text(context.user_data, 'age')
+    await update.message.reply_text(
+        f"{progress_text}\n\n"
+        "📏 Укажите ваш рост (в см, от 100 до 250):"
+    )
     return HEIGHT
 
 async def process_height(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Обработка роста"""
+    text = update.message.text
+    
+    if text == "◀️ Назад":
+        progress_text = get_progress_text(context.user_data, 'age')
+        await update.message.reply_text(
+            f"{progress_text}\n\n"
+            "Введите возраст:"
+        )
+        return AGE
+    
     try:
-        height = int(update.message.text)
+        height = int(text)
         if height < 100 or height > 250:
             await update.message.reply_text("Пожалуйста, введите реальный рост (100-250 см):")
             return HEIGHT
@@ -604,13 +837,28 @@ async def process_height(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return HEIGHT
     
     context.user_data['height'] = height
-    await update.message.reply_text("⚖️ Укажите ваш вес (в кг):")
+    
+    progress_text = get_progress_text(context.user_data, 'height')
+    await update.message.reply_text(
+        f"{progress_text}\n\n"
+        "⚖️ Укажите ваш вес (в кг, от 30 до 300):"
+    )
     return WEIGHT
 
 async def process_weight(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Обработка веса"""
+    text = update.message.text
+    
+    if text == "◀️ Назад":
+        progress_text = get_progress_text(context.user_data, 'height')
+        await update.message.reply_text(
+            f"{progress_text}\n\n"
+            "Введите рост:"
+        )
+        return HEIGHT
+    
     try:
-        weight = int(update.message.text)
+        weight = int(text)
         if weight < 30 or weight > 300:
             await update.message.reply_text("Пожалуйста, введите реальный вес (30-300 кг):")
             return WEIGHT
@@ -619,46 +867,132 @@ async def process_weight(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return WEIGHT
     
     context.user_data['weight'] = weight
+    
+    progress_text = get_progress_text(context.user_data, 'weight')
     await update.message.reply_text(
+        f"{progress_text}\n\n"
         "🏃‍♂️ Укажите ваш уровень физической активности:",
-        reply_markup=create_activity_keyboard()
+        reply_markup=create_activity_keyboard(show_back=True)
     )
     return ACTIVITY
 
 async def process_activity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Обработка уровня активности"""
-    activity = update.message.text
-    if activity not in ['сидячий', 'умеренная', 'активный', 'очень активный']:
+    text = update.message.text
+    
+    if text == "◀️ Назад":
+        progress_text = get_progress_text(context.user_data, 'weight')
+        await update.message.reply_text(
+            f"{progress_text}\n\n"
+            "Введите вес:"
+        )
+        return WEIGHT
+    
+    if text not in ['сидячий', 'умеренная', 'активный', 'очень активный']:
         await update.message.reply_text("Пожалуйста, выберите уровень активности из предложенных вариантов:")
         return ACTIVITY
     
-    context.user_data['activity'] = activity
+    context.user_data['activity'] = text
     
-    # Показываем прогресс
-    user_data = context.user_data
-    progress_text = (
-        "🔄 Собираю ваши данные...\n"
-        "✅ Все параметры получены!\n\n"
-        "📊 Ваши параметры:\n"
-        f"• Цель: {user_data['goal']}\n"
-        f"• Диета: {user_data['diet']}\n"
-        f"• Аллергии: {user_data['allergies']}\n"
-        f"• Пол: {user_data['gender']}\n"
-        f"• Возраст: {user_data['age']} лет\n"
-        f"• Рост: {user_data['height']} см\n"
-        f"• Вес: {user_data['weight']} кг\n"
-        f"• Активность: {user_data['activity']}\n\n"
-        "🎓 Обращаюсь к профессору нутрициологии..."
+    # Показываем все введенные параметры для подтверждения
+    professor = NutritionProfessor()
+    calories = professor.calculate_calories(context.user_data)
+    bju = professor.calculate_bju(context.user_data, calories)
+    water = professor.calculate_water_intake(int(context.user_data['weight']))
+    
+    progress_text = get_progress_text(context.user_data, 'activity')
+    confirmation_text = (
+        f"{progress_text}\n\n"
+        "📊 РАСЧЕТНЫЕ ПОКАЗАТЕЛИ:\n"
+        f"   • 🔥 Суточная норма калорий: {calories} ккал\n"
+        f"   • 🥚 Белки: {bju['protein']}г | 🥑 Жиры: {bju['fat']}г | 🌾 Углеводы: {bju['carbs']}г\n"
+        f"   • 💧 Норма воды: {water['avg_water']} мл/день\n\n"
+        "✅ Все данные введены! Проверьте правильность и подтвердите:"
     )
     
-    progress_message = await update.message.reply_text(progress_text)
-    context.user_data['progress_message'] = progress_message
+    await update.message.reply_text(
+        confirmation_text,
+        reply_markup=create_confirmation_keyboard()
+    )
+    return CONFIRMATION
+
+async def process_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обработка подтверждения параметров"""
+    text = update.message.text
     
-    # Запускаем генерацию плана в отдельном потоке
-    thread = Thread(target=generate_plan_wrapper, args=(update, context, user_data))
-    thread.start()
+    if text == "✅ Да, все верно":
+        # Запускаем генерацию плана
+        user_data = context.user_data
+        
+        progress_message = await update.message.reply_text(
+            "🎓 Обращаюсь к профессору нутрициологии...\n"
+            "📝 Формирую индивидуальный план питания..."
+        )
+        context.user_data['progress_message'] = progress_message
+        
+        # Запускаем генерацию плана в отдельном потоке
+        thread = Thread(target=generate_plan_wrapper, args=(update, context, user_data))
+        thread.start()
+        
+        return GENERATING
+        
+    elif text == "✏️ Редактировать параметры":
+        await update.message.reply_text(
+            "✏️ Выберите параметр для редактирования:",
+            reply_markup=create_edit_keyboard()
+        )
+        return EDIT_PARAMS
     
-    return GENERATING
+    else:
+        await update.message.reply_text("Пожалуйста, выберите вариант из предложенных:")
+        return CONFIRMATION
+
+async def process_edit_params(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обработка редактирования параметров"""
+    text = update.message.text
+    
+    edit_handlers = {
+        "🎯 Цель": (GOAL, create_goal_keyboard(show_back=True), "Выберите цель:"),
+        "🥗 Тип диеты": (DIET, create_diet_keyboard(show_back=True), "Выберите тип диеты:"),
+        "⚠️ Аллергии": (ALLERGIES, create_allergies_keyboard(show_back=True), "Выберите аллергии:"),
+        "👤 Пол": (GENDER, create_gender_keyboard(show_back=True), "Выберите пол:"),
+        "🎂 Возраст": (AGE, ReplyKeyboardRemove(), "Введите возраст:"),
+        "📏 Рост": (HEIGHT, ReplyKeyboardRemove(), "Введите рост:"),
+        "⚖️ Вес": (WEIGHT, ReplyKeyboardRemove(), "Введите вес:"),
+        "🏃‍♂️ Активность": (ACTIVITY, create_activity_keyboard(show_back=True), "Выберите активность:")
+    }
+    
+    if text in edit_handlers:
+        next_state, keyboard, message = edit_handlers[text]
+        await update.message.reply_text(message, reply_markup=keyboard)
+        return next_state
+    
+    elif text == "✅ Завершить редактирование":
+        # Возвращаемся к подтверждению
+        professor = NutritionProfessor()
+        calories = professor.calculate_calories(context.user_data)
+        bju = professor.calculate_bju(context.user_data, calories)
+        water = professor.calculate_water_intake(int(context.user_data['weight']))
+        
+        progress_text = get_progress_text(context.user_data)
+        confirmation_text = (
+            f"{progress_text}\n\n"
+            "📊 РАСЧЕТНЫЕ ПОКАЗАТЕЛИ:\n"
+            f"   • 🔥 Суточная норма калорий: {calories} ккал\n"
+            f"   • 🥚 Белки: {bju['protein']}г | 🥑 Жиры: {bju['fat']}г | 🌾 Углеводы: {bju['carbs']}г\n"
+            f"   • 💧 Норма воды: {water['avg_water']} мл/день\n\n"
+            "✅ Все данные введены! Проверьте правильность и подтвердите:"
+        )
+        
+        await update.message.reply_text(
+            confirmation_text,
+            reply_markup=create_confirmation_keyboard()
+        )
+        return CONFIRMATION
+    
+    else:
+        await update.message.reply_text("Пожалуйста, выберите параметр для редактирования:")
+        return EDIT_PARAMS
 
 def generate_plan_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, user_data: dict):
     """Обертка для запуска генерации плана в отдельном потоке"""
@@ -674,16 +1008,11 @@ async def generate_plan(update: Update, context: ContextTypes.DEFAULT_TYPE, user
         
         # Обновляем прогресс
         await progress_message.edit_text(
-            progress_message.text + "\n📝 Формирую индивидуальный план..."
+            progress_message.text + "\n🤖 Получаю ответ от AI..."
         )
         
         # Создаем промпт для GPT
         prompt = nutrition_professor.create_professor_prompt(user_data)
-        
-        # Обновляем прогресс
-        await progress_message.edit_text(
-            progress_message.text + "\n🤖 Получаю ответ от AI..."
-        )
         
         # Отправляем запрос к Yandex GPT
         gpt_response = yandex_gpt.get_completion(prompt)
@@ -732,15 +1061,34 @@ async def generate_plan(update: Update, context: ContextTypes.DEFAULT_TYPE, user
             caption="👨‍🍳 Рецепты для всех блюд"
         )
         
+        await update.message.reply_document(
+            document=InputFile(f"water_regime_{update.effective_user.id}.txt"),
+            caption="💧 Детальный водный режим"
+        )
+        
+        # Расчеты для итогового сообщения
+        professor = NutritionProfessor()
+        calories = professor.calculate_calories(user_data)
+        water = professor.calculate_water_intake(int(user_data['weight']))
+        
         await update.message.reply_text(
-            "🎉 Готово! Ваш индивидуальный план питания создан!\n\n"
-            "📋 Что вы получили:\n"
-            "• 📅 План питания на 7 дней с 5 приемами пищи\n"
-            "• 🛒 Оптимизированный список покупок\n"
-            "• 👨‍🍳 Подробные рецепты всех блюд\n\n"
-            "Чтобы начать заново, отправьте /start",
+            f"🎉 Готово! Ваш индивидуальный план питания создан!\n\n"
+            f"📋 Что вы получили:\n"
+            f"• 📅 План питания на 7 дней с 5 приемами пищи\n"
+            f"• 🛒 Оптимизированный список покупок\n"
+            f"• 👨‍🍳 Подробные рецепты всех блюд\n"
+            f"• 💧 Детальный водный режим\n\n"
+            f"📊 Ваши показатели:\n"
+            f"• 🔥 Суточная норма: {calories} ккал\n"
+            f"• 💧 Норма воды: {water['avg_water']} мл/день\n"
+            f"• 🕒 8 приемов воды по графику\n\n"
+            f"Чтобы начать заново, отправьте /start",
             reply_markup=ReplyKeyboardRemove()
         )
+        
+        # Очищаем прогресс
+        if 'progress_message' in context.user_data:
+            del context.user_data['progress_message']
         
     except Exception as e:
         logger.error(f"Ошибка при генерации плана: {e}")
@@ -758,6 +1106,9 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         "Диалог отменен. Чтобы начать заново, отправьте /start",
         reply_markup=ReplyKeyboardRemove()
     )
+    
+    # Очищаем данные
+    context.user_data.clear()
     return ConversationHandler.END
 
 # Настройка обработчиков
@@ -772,6 +1123,8 @@ conv_handler = ConversationHandler(
         HEIGHT: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_height)],
         WEIGHT: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_weight)],
         ACTIVITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_activity)],
+        CONFIRMATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_confirmation)],
+        EDIT_PARAMS: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_edit_params)],
         GENERATING: [MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u, c: None)]  # Игнорируем ввод во время генерации
     },
     fallbacks=[CommandHandler('cancel', cancel)]
@@ -801,12 +1154,3 @@ if __name__ == '__main__':
     # Запуск в режиме polling (для разработки)
     print("Бот запущен в режиме polling...")
     application.run_polling()
-    
-    # Для продакшена с вебхуками раскомментируйте:
-    # thread = Thread(target=run_flask)
-    # thread.start()
-    # application.run_webhook(
-    #     listen="0.0.0.0",
-    #     port=5000,
-    #     webhook_url=WEBHOOK_URL
-    # )
