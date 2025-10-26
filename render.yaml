@@ -11,3 +11,12 @@ services:
         value: "362423055"
       - key: PORT
         value: "10000"
+      - key: YANDEX_FOLDER_ID
+        sync: false
+      - key: YANDEX_API_KEY
+        sync: false
+      - key: RENDER_EXTERNAL_URL
+        fromService:
+          type: web
+          name: nutrition-bot
+          property: url
