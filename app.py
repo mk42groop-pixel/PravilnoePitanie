@@ -3,13 +3,11 @@ import json
 import re
 import logging
 import asyncio
-import time
 import requests
 from typing import Dict, Any, List, Tuple
 from dotenv import load_dotenv
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
-from flask import Flask, request, jsonify
 from threading import Thread
 from datetime import datetime
 
@@ -27,6 +25,7 @@ BOT_TOKEN = os.getenv('BOT_TOKEN')
 YANDEX_FOLDER_ID = os.getenv('YANDEX_FOLDER_ID')
 YANDEX_API_KEY = os.getenv('YANDEX_API_KEY')
 WEBHOOK_URL = os.getenv('WEBHOOK_URL')
+PORT = int(os.environ.get('PORT', 5000))
 
 # Состояния беседы
 (
@@ -1133,37 +1132,6 @@ conv_handler = ConversationHandler(
 
 application.add_handler(conv_handler)
 
-# Flask приложение для вебхуков
-app = Flask(__name__)
-
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    """Обработка вебхуков от Telegram"""
-    try:
-        if request.method == "POST":
-            json_data = request.get_json()
-            logger.info(f"Received webhook update: {json_data}")
-            
-            update = Update.de_json(json_data, application.bot)
-            
-            # Используем create_task для асинхронной обработки
-            asyncio.create_task(
-                application.update_queue.put(update)
-            )
-            
-        return 'ok'
-    except Exception as e:
-        logger.error(f"Webhook error: {e}")
-        return 'error', 500
-
-@app.route('/')
-def index():
-    return '🤖 Nutrition Professor Bot is running! ✅'
-
-@app.route('/health')
-def health():
-    return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()})
-
 async def setup_webhook():
     """Настройка вебхука"""
     try:
@@ -1184,14 +1152,18 @@ async def setup_webhook():
 
 def run_webhook():
     """Запуск через вебхук"""
-    port = int(os.environ.get('PORT', 5000))
+    print("🚀 Запуск бота в режиме вебхука...")
     
     # Настраиваем вебхук
     asyncio.run(setup_webhook())
     
-    # Запускаем Flask
-    print(f"🚀 Запускаем Flask сервер на порту {port}")
-    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+    # Запускаем вебхук сервер
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        webhook_url=f"{WEBHOOK_URL}/webhook",
+        drop_pending_updates=True
+    )
 
 def run_polling():
     """Запуск через polling"""
