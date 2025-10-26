@@ -1132,9 +1132,13 @@ conv_handler = ConversationHandler(
 
 application.add_handler(conv_handler)
 
-async def setup_webhook():
-    """Настройка вебхука"""
-    try:
+# Создаем и запускаем event loop для вебхука
+def run_webhook():
+    """Запуск вебхука в отдельном event loop"""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    async def setup():
         # Удаляем существующий вебхук
         await application.bot.delete_webhook()
         print("✅ Старый вебхук удален")
@@ -1145,25 +1149,22 @@ async def setup_webhook():
             drop_pending_updates=True
         )
         print(f"✅ Новый вебхук установлен: {WEBHOOK_URL}/webhook")
-        return True
-    except Exception as e:
-        print(f"❌ Ошибка настройки вебхука: {e}")
-        return False
-
-def run_webhook():
-    """Запуск через вебхук"""
-    print("🚀 Запуск бота в режиме вебхука...")
+        
+        # Запускаем вебхук сервер
+        await application.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            webhook_url=f"{WEBHOOK_URL}/webhook",
+            drop_pending_updates=True
+        )
     
-    # Настраиваем вебхук
-    asyncio.run(setup_webhook())
-    
-    # Запускаем вебхук сервер
-    application.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        webhook_url=f"{WEBHOOK_URL}/webhook",
-        drop_pending_updates=True
-    )
+    try:
+        print("🚀 Запуск бота в режиме вебхука...")
+        loop.run_until_complete(setup())
+    except KeyboardInterrupt:
+        pass
+    finally:
+        loop.close()
 
 def run_polling():
     """Запуск через polling"""
