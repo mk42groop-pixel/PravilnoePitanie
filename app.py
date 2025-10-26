@@ -2,14 +2,15 @@ import os
 import json
 import re
 import logging
-import asyncio
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple
 from dotenv import load_dotenv
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 from flask import Flask, request
 import requests
+import asyncio
 from threading import Thread
+from datetime import datetime
 
 load_dotenv()
 
@@ -24,12 +25,7 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 YANDEX_FOLDER_ID = os.getenv('YANDEX_FOLDER_ID')
 YANDEX_API_KEY = os.getenv('YANDEX_API_KEY')
-ADMIN_USER_ID = int(os.getenv('ADMIN_USER_ID', '362423055'))
-PORT = int(os.getenv('PORT', 10000))
-
-# Базовый URL для вебхука
-RENDER_DOMAIN = os.getenv('RENDER_EXTERNAL_URL', 'https://pravilnoepitanie.onrender.com')
-WEBHOOK_URL = f"{RENDER_DOMAIN}/webhook"
+WEBHOOK_URL = os.getenv('WEBHOOK_URL')
 
 # Состояния беседы
 (
@@ -108,10 +104,11 @@ class NutritionProfessor:
     
     def calculate_water_intake(self, weight: int) -> Dict[str, Any]:
         """Расчет водного режима (30-40 мл на 1 кг веса)"""
-        min_water = weight * 30
-        max_water = weight * 40
+        min_water = weight * 30  # минимальная норма
+        max_water = weight * 40  # максимальная норма
         avg_water = (min_water + max_water) // 2
         
+        # График приема воды в течение дня (8 приемов)
         water_schedule = [
             {"time": "07:00", "amount": 250, "description": "Стакан теплой воды натощак для запуска метаболизма"},
             {"time": "08:30", "amount": 200, "description": "После завтрака - способствует пищеварению"},
@@ -1128,7 +1125,7 @@ conv_handler = ConversationHandler(
         ACTIVITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_activity)],
         CONFIRMATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_confirmation)],
         EDIT_PARAMS: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_edit_params)],
-        GENERATING: [MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u, c: None)]
+        GENERATING: [MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u, c: None)]  # Игнорируем ввод во время генерации
     },
     fallbacks=[CommandHandler('cancel', cancel)]
 )
@@ -1141,63 +1138,19 @@ app = Flask(__name__)
 @app.route('/webhook', methods=['POST'])
 def webhook():
     """Обработка вебхуков от Telegram"""
-    try:
-        update = Update.de_json(request.get_json(), application.bot)
-        
-        # Создаем и запускаем новую event loop для каждого запроса
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        async def process():
-            await application.process_update(update)
-        
-        loop.run_until_complete(process())
-        loop.close()
-        
-        return 'ok'
-    except Exception as e:
-        logger.error(f"Ошибка в webhook: {e}")
-        return 'error', 500
+    update = Update.de_json(request.get_json(), application.bot)
+    application.update_queue.put(update)
+    return 'ok'
 
 @app.route('/')
 def index():
-    return '🚀 Бот профессора нутрициологии работает!'
+    return 'Bot is running!'
 
-@app.route('/health')
-def health():
-    return '✅ OK'
-
-# Инициализация вебхука при запуске
-async def init_webhook():
-    """Инициализация вебхука"""
-    try:
-        # Удаляем старый вебхук если есть
-        await application.bot.delete_webhook(drop_pending_updates=True)
-        
-        # Устанавливаем новый вебхук
-        await application.bot.set_webhook(
-            url=WEBHOOK_URL,
-            drop_pending_updates=True,
-            allowed_updates=Update.ALL_TYPES
-        )
-        print(f"✅ Webhook установлен: {WEBHOOK_URL}")
-        
-        # Инициализируем приложение
-        await application.initialize()
-        await application.start()
-        print("✅ Приложение Telegram инициализировано")
-        
-    except Exception as e:
-        print(f"❌ Ошибка инициализации: {e}")
+def run_flask():
+    """Запуск Flask сервера"""
+    app.run(host='0.0.0.0', port=5000)
 
 if __name__ == '__main__':
-    print("🚀 Запуск бота профессора нутрициологии...")
-    
-    # Инициализируем вебхук
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(init_webhook())
-    
-    # Запускаем Flask
-    print(f"🌐 Flask запущен на порту {PORT}")
-    app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
+    # Запуск в режиме polling (для разработки)
+    print("Бот запущен в режиме polling...")
+    application.run_polling()
