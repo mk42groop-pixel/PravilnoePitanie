@@ -2,13 +2,13 @@ import os
 import json
 import re
 import logging
+import asyncio
+import time
 from typing import Dict, Any, List, Tuple
 from dotenv import load_dotenv
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
-from flask import Flask, request
-import requests
-import asyncio
+from flask import Flask, request, jsonify
 from threading import Thread
 from datetime import datetime
 
@@ -114,7 +114,7 @@ class NutritionProfessor:
             {"time": "08:30", "amount": 200, "description": "После завтрака - способствует пищеварению"},
             {"time": "10:00", "amount": 200, "description": "Между завтраком и перекусом - поддержание гидратации"},
             {"time": "11:30", "amount": 200, "description": "Перед обедом - подготовка ЖКТ к приему пищи"},
-            {"time": "13:30", "amount": 200, "description": "После обеда - через 30 минут после еды"},
+            {"time": "13:30", "amount": 200, "description": "После обед - через 30 минут после еды"},
             {"time": "15:00", "amount": 200, "description": "Во второй половине дня - поддержание энергии"},
             {"time": "17:00", "amount": 200, "description": "Перед ужином - снижение аппетита"},
             {"time": "19:00", "amount": 200, "description": "После ужина - завершение дневной нормы"}
@@ -206,7 +206,7 @@ class NutritionProfessor:
                     {{"time": "08:30", "amount": 200, "description": "После завтрака"}}
                 ],
                 "general_recommendations": [
-                    "Пейте воду за 30 минут до еды",
+                    "Пейте воду за 30 минут до еда",
                     "Не пейте во время приема пищи",
                     "Увеличьте потребление при физических нагрузках"
                 ]
@@ -1138,19 +1138,62 @@ app = Flask(__name__)
 @app.route('/webhook', methods=['POST'])
 def webhook():
     """Обработка вебхуков от Telegram"""
-    update = Update.de_json(request.get_json(), application.bot)
-    application.update_queue.put(update)
-    return 'ok'
+    try:
+        if request.method == "POST":
+            update = Update.de_json(request.get_json(), application.bot)
+            application.update_queue.put(update)
+        return 'ok'
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        return 'error', 500
 
 @app.route('/')
 def index():
-    return 'Bot is running!'
+    return '🤖 Nutrition Professor Bot is running! ✅'
 
-def run_flask():
-    """Запуск Flask сервера"""
-    app.run(host='0.0.0.0', port=5000)
+@app.route('/health')
+def health():
+    return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()})
+
+async def cleanup_webhook():
+    """Очистка вебхука перед любым запуском"""
+    try:
+        await application.bot.delete_webhook()
+        print("✅ Вебхуки очищены")
+        return True
+    except Exception as e:
+        print(f"⚠️ Ошибка очистки вебхуков: {e}")
+        return False
+
+def run_production():
+    """Продакшен режим с вебхуком"""
+    port = int(os.environ.get('PORT', 5000))
+    
+    async def setup_production():
+        await cleanup_webhook()
+        await application.bot.set_webhook(f"{WEBHOOK_URL}/webhook")
+        print(f"🚀 Production: Вебхук установлен на {WEBHOOK_URL}/webhook")
+    
+    asyncio.run(setup_production())
+    print(f"🌐 Запуск Flask сервера на порту {port}")
+    app.run(host='0.0.0.0', port=port, debug=False)
+
+def run_development():
+    """Режим разработки с polling"""
+    async def setup_development():
+        await cleanup_webhook()
+        print("🔍 Development: Запуск в режиме polling...")
+    
+    asyncio.run(setup_development())
+    application.run_polling()
 
 if __name__ == '__main__':
-    # Запуск в режиме polling (для разработки)
-    print("Бот запущен в режиме polling...")
-    application.run_polling()
+    # Автоматическое определение среды
+    is_render = os.environ.get('RENDER') is not None
+    is_webhook_env = os.environ.get('USE_WEBHOOK') is not None
+    has_webhook_url = bool(WEBHOOK_URL)
+    
+    if is_render or is_webhook_env or has_webhook_url:
+        run_production()
+    else:
+        run_development()
