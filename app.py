@@ -209,7 +209,7 @@ class NutritionProfessor:
                     {{"time": "08:30", "amount": 200, "description": "После завтрака"}}
                 ],
                 "general_recommendations": [
-                    "Пейте воду за 30 минут до еда",
+                    "Пейте воду за 30 минут до еды",
                     "Не пейте во время приема пищи",
                     "Увеличьте потребление при физических нагрузках"
                 ]
@@ -1143,7 +1143,17 @@ def webhook():
     """Обработка вебхуков от Telegram"""
     try:
         update = Update.de_json(request.get_json(), application.bot)
-        application.update_queue.put(update)
+        
+        # Создаем и запускаем новую event loop для каждого запроса
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        async def process():
+            await application.process_update(update)
+        
+        loop.run_until_complete(process())
+        loop.close()
+        
         return 'ok'
     except Exception as e:
         logger.error(f"Ошибка в webhook: {e}")
@@ -1167,14 +1177,15 @@ async def init_webhook():
         # Устанавливаем новый вебхук
         await application.bot.set_webhook(
             url=WEBHOOK_URL,
-            drop_pending_updates=True
+            drop_pending_updates=True,
+            allowed_updates=Update.ALL_TYPES
         )
         print(f"✅ Webhook установлен: {WEBHOOK_URL}")
         
-        # Запускаем приложение
+        # Инициализируем приложение
         await application.initialize()
         await application.start()
-        print("✅ Приложение Telegram запущено")
+        print("✅ Приложение Telegram инициализировано")
         
     except Exception as e:
         print(f"❌ Ошибка инициализации: {e}")
@@ -1182,20 +1193,11 @@ async def init_webhook():
 if __name__ == '__main__':
     print("🚀 Запуск бота профессора нутрициологии...")
     
-    # Всегда используем вебхук на Render
-    if os.getenv('RENDER') or True:  # Принудительно вебхук для Render
-        print("🔧 Режим: Webhook (Render)")
-        
-        # Инициализируем вебхук
-        asyncio.run(init_webhook())
-        
-        # Запускаем Flask
-        print(f"🌐 Flask запущен на порту {PORT}")
-        app.run(host='0.0.0.0', port=PORT, debug=False)
-        
-    else:
-        print("🔧 Режим: Webhook (универсальный)")
-        
-        # Универсальный вебхук режим
-        asyncio.run(init_webhook())
-        app.run(host='0.0.0.0', port=PORT, debug=False)
+    # Инициализируем вебхук
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(init_webhook())
+    
+    # Запускаем Flask
+    print(f"🌐 Flask запущен на порту {PORT}")
+    app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
