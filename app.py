@@ -2,15 +2,14 @@ import os
 import json
 import re
 import logging
-from typing import Dict, Any, List, Tuple
+import asyncio
+from typing import Dict, Any, List
 from dotenv import load_dotenv
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 from flask import Flask, request
 import requests
-import asyncio
 from threading import Thread
-from datetime import datetime
 
 load_dotenv()
 
@@ -25,7 +24,12 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 YANDEX_FOLDER_ID = os.getenv('YANDEX_FOLDER_ID')
 YANDEX_API_KEY = os.getenv('YANDEX_API_KEY')
-WEBHOOK_URL = os.getenv('WEBHOOK_URL')
+ADMIN_USER_ID = int(os.getenv('ADMIN_USER_ID', '362423055'))
+PORT = int(os.getenv('PORT', 10000))
+
+# Базовый URL для вебхука (замените на ваш домен Render)
+RENDER_DOMAIN = os.getenv('RENDER_EXTERNAL_URL', 'https://your-app-name.onrender.com')
+WEBHOOK_URL = f"{RENDER_DOMAIN}/webhook"
 
 # Состояния беседы
 (
@@ -104,11 +108,10 @@ class NutritionProfessor:
     
     def calculate_water_intake(self, weight: int) -> Dict[str, Any]:
         """Расчет водного режима (30-40 мл на 1 кг веса)"""
-        min_water = weight * 30  # минимальная норма
-        max_water = weight * 40  # максимальная норма
+        min_water = weight * 30
+        max_water = weight * 40
         avg_water = (min_water + max_water) // 2
         
-        # График приема воды в течение дня (8 приемов)
         water_schedule = [
             {"time": "07:00", "amount": 250, "description": "Стакан теплой воды натощак для запуска метаболизма"},
             {"time": "08:30", "amount": 200, "description": "После завтрака - способствует пищеварению"},
@@ -206,7 +209,7 @@ class NutritionProfessor:
                     {{"time": "08:30", "amount": 200, "description": "После завтрака"}}
                 ],
                 "general_recommendations": [
-                    "Пейте воду за 30 минут до еды",
+                    "Пейте воду за 30 минут до еда",
                     "Не пейте во время приема пищи",
                     "Увеличьте потребление при физических нагрузках"
                 ]
@@ -1125,7 +1128,7 @@ conv_handler = ConversationHandler(
         ACTIVITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_activity)],
         CONFIRMATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_confirmation)],
         EDIT_PARAMS: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_edit_params)],
-        GENERATING: [MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u, c: None)]  # Игнорируем ввод во время генерации
+        GENERATING: [MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u, c: None)]
     },
     fallbacks=[CommandHandler('cancel', cancel)]
 )
@@ -1144,13 +1147,36 @@ def webhook():
 
 @app.route('/')
 def index():
-    return 'Bot is running!'
+    return '🚀 Бот профессора нутрициологии работает!'
 
-def run_flask():
-    """Запуск Flask сервера"""
-    app.run(host='0.0.0.0', port=5000)
+@app.route('/health')
+def health():
+    return '✅ OK'
+
+# Инициализация вебхука при запуске
+async def init_webhook():
+    """Инициализация вебхука"""
+    try:
+        await application.bot.set_webhook(
+            url=WEBHOOK_URL,
+            drop_pending_updates=True
+        )
+        print(f"✅ Webhook установлен: {WEBHOOK_URL}")
+    except Exception as e:
+        print(f"❌ Ошибка установки webhook: {e}")
 
 if __name__ == '__main__':
-    # Запуск в режиме polling (для разработки)
-    print("Бот запущен в режиме polling...")
-    application.run_polling()
+    # Проверяем, запущен ли в Render
+    if os.getenv('RENDER'):
+        print("🚀 Запуск в режиме Webhook на Render...")
+        # Инициализируем вебхук
+        asyncio.run(init_webhook())
+        # Запускаем Flask на порту 10000
+        app.run(host='0.0.0.0', port=PORT, debug=False)
+    else:
+        print("🔧 Запуск в режиме Polling (разработка)...")
+        # Режим polling для локальной разработки
+        application.run_polling(
+            drop_pending_updates=True,
+            allowed_updates=Update.ALL_TYPES
+        )
