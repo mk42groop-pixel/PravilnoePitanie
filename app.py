@@ -1141,8 +1141,16 @@ def webhook():
     """Обработка вебхуков от Telegram"""
     try:
         if request.method == "POST":
-            update = Update.de_json(request.get_json(), application.bot)
-            application.update_queue.put(update)
+            json_data = request.get_json()
+            logger.info(f"Received webhook update: {json_data}")
+            
+            update = Update.de_json(json_data, application.bot)
+            
+            # Используем create_task для асинхронной обработки
+            asyncio.create_task(
+                application.update_queue.put(update)
+            )
+            
         return 'ok'
     except Exception as e:
         logger.error(f"Webhook error: {e}")
@@ -1164,7 +1172,10 @@ async def setup_webhook():
         print("✅ Старый вебхук удален")
         
         # Устанавливаем новый вебхук
-        await application.bot.set_webhook(f"{WEBHOOK_URL}/webhook")
+        await application.bot.set_webhook(
+            f"{WEBHOOK_URL}/webhook",
+            drop_pending_updates=True
+        )
         print(f"✅ Новый вебхук установлен: {WEBHOOK_URL}/webhook")
         return True
     except Exception as e:
@@ -1180,7 +1191,7 @@ def run_webhook():
     
     # Запускаем Flask
     print(f"🚀 Запускаем Flask сервер на порту {port}")
-    app.run(host='0.0.0.0', port=port, debug=False)
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
 def run_polling():
     """Запуск через polling"""
