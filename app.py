@@ -27,8 +27,8 @@ YANDEX_API_KEY = os.getenv('YANDEX_API_KEY')
 ADMIN_USER_ID = int(os.getenv('ADMIN_USER_ID', '362423055'))
 PORT = int(os.getenv('PORT', 10000))
 
-# Базовый URL для вебхука (замените на ваш домен Render)
-RENDER_DOMAIN = os.getenv('RENDER_EXTERNAL_URL', 'https://your-app-name.onrender.com')
+# Базовый URL для вебхука
+RENDER_DOMAIN = os.getenv('RENDER_EXTERNAL_URL', 'https://pravilnoepitanie.onrender.com')
 WEBHOOK_URL = f"{RENDER_DOMAIN}/webhook"
 
 # Состояния беседы
@@ -1141,9 +1141,13 @@ app = Flask(__name__)
 @app.route('/webhook', methods=['POST'])
 def webhook():
     """Обработка вебхуков от Telegram"""
-    update = Update.de_json(request.get_json(), application.bot)
-    application.update_queue.put(update)
-    return 'ok'
+    try:
+        update = Update.de_json(request.get_json(), application.bot)
+        application.update_queue.put(update)
+        return 'ok'
+    except Exception as e:
+        logger.error(f"Ошибка в webhook: {e}")
+        return 'error', 500
 
 @app.route('/')
 def index():
@@ -1157,26 +1161,41 @@ def health():
 async def init_webhook():
     """Инициализация вебхука"""
     try:
+        # Удаляем старый вебхук если есть
+        await application.bot.delete_webhook(drop_pending_updates=True)
+        
+        # Устанавливаем новый вебхук
         await application.bot.set_webhook(
             url=WEBHOOK_URL,
             drop_pending_updates=True
         )
         print(f"✅ Webhook установлен: {WEBHOOK_URL}")
+        
+        # Запускаем приложение
+        await application.initialize()
+        await application.start()
+        print("✅ Приложение Telegram запущено")
+        
     except Exception as e:
-        print(f"❌ Ошибка установки webhook: {e}")
+        print(f"❌ Ошибка инициализации: {e}")
 
 if __name__ == '__main__':
-    # Проверяем, запущен ли в Render
-    if os.getenv('RENDER'):
-        print("🚀 Запуск в режиме Webhook на Render...")
+    print("🚀 Запуск бота профессора нутрициологии...")
+    
+    # Всегда используем вебхук на Render
+    if os.getenv('RENDER') or True:  # Принудительно вебхук для Render
+        print("🔧 Режим: Webhook (Render)")
+        
         # Инициализируем вебхук
         asyncio.run(init_webhook())
-        # Запускаем Flask на порту 10000
+        
+        # Запускаем Flask
+        print(f"🌐 Flask запущен на порту {PORT}")
         app.run(host='0.0.0.0', port=PORT, debug=False)
+        
     else:
-        print("🔧 Запуск в режиме Polling (разработка)...")
-        # Режим polling для локальной разработки
-        application.run_polling(
-            drop_pending_updates=True,
-            allowed_updates=Update.ALL_TYPES
-        )
+        print("🔧 Режим: Webhook (универсальный)")
+        
+        # Универсальный вебхук режим
+        asyncio.run(init_webhook())
+        app.run(host='0.0.0.0', port=PORT, debug=False)
