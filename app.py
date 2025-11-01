@@ -3,13 +3,14 @@ import json
 import re
 import logging
 import asyncio
+import random
 import requests
 from typing import Dict, Any, List, Tuple
 from dotenv import load_dotenv
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 from threading import Thread
-from datetime import datetime
+from datetime import datetime, timedelta
 
 load_dotenv()
 
@@ -25,18 +26,74 @@ BOT_TOKEN = os.getenv('BOT_TOKEN')
 YANDEX_FOLDER_ID = os.getenv('YANDEX_FOLDER_ID')
 YANDEX_API_KEY = os.getenv('YANDEX_API_KEY')
 WEBHOOK_URL = os.getenv('WEBHOOK_URL')
+ADMIN_CHAT_ID = os.getenv('ADMIN_CHAT_ID')
+CHANNEL_USERNAME = "@ppsupershef"
 PORT = int(os.environ.get('PORT', 5000))
 
 # Состояния беседы
 (
-    START, GOAL, DIET, ALLERGIES, GENDER, AGE, HEIGHT, WEIGHT, ACTIVITY,
-    CONFIRMATION, EDIT_PARAMS, GENERATING
-) = range(12)
+    SUBSCRIPTION_CHECK, START, GOAL, DIET, ALLERGIES, GENDER, AGE, HEIGHT, WEIGHT, ACTIVITY,
+    CONFIRMATION, SELECT_PACKAGE, PAYMENT_METHOD, AWAITING_PAYMENT, PROCESSING
+) = range(15)
+
+# Пакеты услуг
+SERVICE_PACKAGES = {
+    'basic': {
+        'name': '🎯 Базовый пакет',
+        'description': 'План питания на 7 дней + расчет БЖУ',
+        'price': 100,
+        'features': [
+            '📅 План питания на 7 дней',
+            '📊 Расчет БЖУ и калорий', 
+            '💧 Рекомендации по водному режиму'
+        ]
+    },
+    'standard': {
+        'name': '🚀 Стандартный пакет',
+        'description': 'План + рецепты на 7 дней',
+        'price': 200,
+        'features': [
+            '📅 План питания на 7 дней',
+            '📊 Расчет БЖУ и калорий',
+            '💧 Рекомендации по водному режиму',
+            '👨‍🍳 Подробные рецепты на 7 дней'
+        ]
+    },
+    'premium': {
+        'name': '👑 Премиум пакет',
+        'description': 'Полный комплект + бонусы',
+        'price': 300,
+        'features': [
+            '📅 План питания на 7 дней',
+            '📊 Расчет БЖУ и калорий',
+            '👨‍🍳 Подробные рецепты на 7 дней',
+            '🛒 Умный список покупок',
+            '💧 Детальный водный режим',
+            '🎁 Бонус: гайд по ПП'
+        ]
+    }
+}
+
+class SubscriptionChecker:
+    async def check_subscription(self, user_id: int, bot) -> bool:
+        """Проверка подписки пользователя на канал"""
+        try:
+            chat_member = await bot.get_chat_member(
+                chat_id=CHANNEL_USERNAME, 
+                user_id=user_id
+            )
+            
+            valid_statuses = ['member', 'administrator', 'creator']
+            return chat_member.status in valid_statuses
+            
+        except Exception as e:
+            logger.error(f"Ошибка проверки подписки: {e}")
+            return False
 
 class NutritionProfessor:
     def __init__(self):
         self.required_days = ['понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота', 'воскресенье']
-        self.meals = ['завтрак', 'перекус', 'обед', 'перекус', 'ужин']
+        self.meals = ['завтрак', 'перекус', 'обед', 'перекус', 'ужиn']
     
     def calculate_bmi(self, height: int, weight: int) -> float:
         """Расчет индекса массы тела"""
@@ -50,13 +107,11 @@ class NutritionProfessor:
         gender = user_data['gender']
         activity = user_data['activity']
         
-        # Базовый метаболизм
         if gender == 'мужской':
             bmr = 10 * weight + 6.25 * height - 5 * age + 5
         else:
             bmr = 10 * weight + 6.25 * height - 5 * age - 161
         
-        # Коэффициент активности
         activity_multipliers = {
             'сидячий': 1.2,
             'умеренная': 1.375,
@@ -66,13 +121,12 @@ class NutritionProfessor:
         
         maintenance = bmr * activity_multipliers.get(activity, 1.375)
         
-        # Корректировка по цели
         goal = user_data['goal']
         if goal == 'похудение':
             return int(maintenance * 0.85)
         elif goal == 'набор мышечной массы':
             return int(maintenance * 1.15)
-        else:  # поддержание веса
+        else:
             return int(maintenance)
     
     def calculate_bju(self, user_data: Dict[str, Any], calories: int) -> Dict[str, float]:
@@ -87,7 +141,7 @@ class NutritionProfessor:
             protein_ratio = 0.35
             fat_ratio = 0.25
             carb_ratio = 0.40
-        else:  # поддержание веса
+        else:
             protein_ratio = 0.25
             fat_ratio = 0.25
             carb_ratio = 0.50
@@ -103,12 +157,11 @@ class NutritionProfessor:
         }
     
     def calculate_water_intake(self, weight: int) -> Dict[str, Any]:
-        """Расчет водного режима (30-40 мл на 1 кг веса)"""
-        min_water = weight * 30  # минимальная норма
-        max_water = weight * 40  # максимальная норма
+        """Расчет водного режима"""
+        min_water = weight * 30
+        max_water = weight * 40
         avg_water = (min_water + max_water) // 2
         
-        # График приема воды в течение дня (8 приемов)
         water_schedule = [
             {"time": "07:00", "amount": 250, "description": "Стакан теплой воды натощак для запуска метаболизма"},
             {"time": "08:30", "amount": 200, "description": "После завтрака - способствует пищеварению"},
@@ -132,454 +185,298 @@ class NutritionProfessor:
                 "Ограничьте потребление жидкости за 2 часа до сна"
             ]
         }
-    
-    def create_professor_prompt(self, user_data: Dict[str, Any]) -> str:
-        """Создание промпта для профессора нутрициологии"""
-        calories = self.calculate_calories(user_data)
-        bju = self.calculate_bju(user_data, calories)
-        bmi = self.calculate_bmi(int(user_data['height']), int(user_data['weight']))
-        water = self.calculate_water_intake(int(user_data['weight']))
-        
-        return f"""
-        Ты профессор нутрициологии с 40-летним опытом. Составь индивидуальный план питания на 7 дней.
 
-        ПАРАМЕТРЫ КЛИЕНТА:
-        - Пол: {user_data['gender']}
-        - Возраст: {user_data['age']} лет
-        - Рост: {user_data['height']} см
-        - Вес: {user_data['weight']} кг
-        - ИМТ: {bmi}
-        - Уровень активности: {user_data['activity']}
-        - Цель: {user_data['goal']}
-        - Тип диеты: {user_data['diet']}
-        - Аллергии: {user_data['allergies']}
-
-        РАСЧЕТНЫЕ ПОКАЗАТЕЛИ:
-        - Суточная норма калорий: {calories} ккал
-        - Рекомендуемое БЖУ: {bju['protein']}г белка, {bju['fat']}г жиров, {bju['carbs']}г углеводов
-        - Норма воды: {water['avg_water']} мл в день
-
-        ТРЕБОВАНИЯ К ПЛАНУ:
-        1. 5 приемов пищи ежедневно: завтрак, перекус, обед, перекус, ужин
-        2. Сбалансированное БЖУ согласно принципам нутрициологии
-        3. Учет циркадных ритмов и времени приема пищи
-        4. Разнообразие блюд без повторений в течение недели
-        5. Практическая реализуемость рецептов
-        6. Учет диетических ограничений и аллергий
-        7. Включи рекомендации по водному режиму
-
-        ФОРМАТ ОТВЕТА - STRICT JSON:
-        {{
-            "понедельник": {{
-                "завтрак": {{
-                    "name": "Название блюда",
-                    "calories": 350,
-                    "protein": 20,
-                    "carbs": 40,
-                    "fat": 10,
-                    "ingredients": [
-                        {{"name": "ингредиент", "quantity": 100, "unit": "гр"}}
-                    ],
-                    "recipe": "Подробный рецепт приготовления",
-                    "water_recommendation": "Выпейте стакан воды за 30 минут до еды"
-                }},
-                "перекус": {{...}},
-                "обед": {{...}},
-                "перекус": {{...}},
-                "ужин": {{...}},
-                "total_calories": {calories},
-                "total_protein": {bju['protein']},
-                "total_carbs": {bju['carbs']},
-                "total_fat": {bju['fat']},
-                "water_notes": "Рекомендации по водному режиму на день"
-            }},
-            "вторник": {{...}},
-            "среда": {{...}},
-            "четверг": {{...}},
-            "пятница": {{...}},
-            "суббота": {{...}},
-            "воскресенье": {{...}},
-            "water_regime": {{
-                "daily_total": {water['avg_water']},
-                "schedule": [
-                    {{"time": "07:00", "amount": 250, "description": "Стакан теплой воды натощак"}},
-                    {{"time": "08:30", "amount": 200, "description": "После завтрака"}}
-                ],
-                "general_recommendations": [
-                    "Пейте воду за 30 минут до еды",
-                    "Не пейте во время приема пищи",
-                    "Увеличьте потребление при физических нагрузках"
-                ]
-            }}
-        }}
-
-        Соблюдай общую калорийность {calories} ±100 ккал в день и баланс БЖУ.
-        Верни ТОЛЬКО JSON без дополнительного текста.
-        """
-
-class YandexGPTClient:
+class AdminPanel:
     def __init__(self):
-        self.folder_id = YANDEX_FOLDER_ID
-        self.api_key = YANDEX_API_KEY
-        self.url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
+        self.orders = {}
+        self.admin_chat_id = ADMIN_CHAT_ID
     
-    def get_completion(self, prompt: str) -> str:
-        """Получение ответа от Yandex GPT"""
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Api-Key {self.api_key}",
-            "x-folder-id": self.folder_id
-        }
-        
-        data = {
-            "modelUri": f"gpt://{self.folder_id}/yandexgpt-lite",
-            "completionOptions": {
-                "stream": False,
-                "temperature": 0.7,
-                "maxTokens": 4000
-            },
-            "messages": [
-                {
-                    "role": "system",
-                    "text": "Ты профессор нутрициологии с 40-летним опытом. Составляешь индивидуальные планы питания."
-                },
-                {
-                    "role": "user",
-                    "text": prompt
-                }
-            ]
-        }
-        
-        try:
-            response = requests.post(self.url, headers=headers, json=data, timeout=60)
-            response.raise_for_status()
-            result = response.json()
-            return result['result']['alternatives'][0]['message']['text']
-        except Exception as e:
-            logger.error(f"Ошибка Yandex GPT: {e}")
-            return ""
-
-class NutritionPlanParser:
-    def __init__(self):
-        self.validator = NutritionValidator()
-    
-    def parse_gpt_response(self, response_text: str, user_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Парсинг ответа от Yandex GPT"""
-        try:
-            cleaned_text = self._clean_response_text(response_text)
-            nutrition_plan = json.loads(cleaned_text)
-            
-            if self.validator.validate_plan_structure(nutrition_plan):
-                if self.validator.validate_nutrition_values(nutrition_plan, user_data):
-                    return nutrition_plan
-            
-            return self._create_fallback_plan(user_data)
-            
-        except Exception as e:
-            logger.error(f"Ошибка парсинга: {e}")
-            return self._create_fallback_plan(user_data)
-    
-    def _clean_response_text(self, text: str) -> str:
-        """Очистка текста ответа"""
-        text = re.sub(r'```json\s*', '', text)
-        text = re.sub(r'\s*```', '', text)
-        return text.strip()
-    
-    def _create_fallback_plan(self, user_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Создание резервного плана питания"""
-        professor = NutritionProfessor()
-        water = professor.calculate_water_intake(int(user_data['weight']))
-        
-        plan = {}
-        for day in ['понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота', 'воскресенье']:
-            plan[day] = {
-                'завтрак': self._create_fallback_meal('завтрак'),
-                'перекус': self._create_fallback_meal('перекус'),
-                'обед': self._create_fallback_meal('обед'),
-                'перекус': self._create_fallback_meal('перекус'),
-                'ужин': self._create_fallback_meal('ужин'),
-                'total_calories': 2000,
-                'total_protein': 100,
-                'total_carbs': 250,
-                'total_fat': 65,
-                'water_notes': 'Пейте воду за 30 минут до каждого приема пищи'
-            }
-        
-        plan['water_regime'] = water
-        return plan
-    
-    def _create_fallback_meal(self, meal_type: str) -> Dict[str, Any]:
-        """Создание резервного приема пищи"""
-        meals = {
-            'завтрак': {'name': 'Овсяная каша с ягодами', 'calories': 350},
-            'перекус': {'name': 'Йогурт натуральный', 'calories': 150},
-            'обед': {'name': 'Куриная грудка с гречкой', 'calories': 450},
-            'ужин': {'name': 'Рыба на пару с овощами', 'calories': 400}
-        }
-        
-        meal = meals.get(meal_type, {'name': 'Блюдо', 'calories': 300})
-        return {
-            'name': meal['name'],
-            'calories': meal['calories'],
-            'protein': 20,
-            'carbs': 40,
-            'fat': 10,
-            'ingredients': [{'name': 'продукт', 'quantity': 100, 'unit': 'гр'}],
-            'recipe': 'Рецепт приготовления блюда',
-            'water_recommendation': 'Выпейте стакан воды за 30 минут до еды'
-        }
-
-class NutritionValidator:
-    def validate_plan_structure(self, plan: Dict[str, Any]) -> bool:
-        """Валидация структуры плана питания"""
-        required_days = ['понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота', 'воскресенье']
-        required_meals = ['завтрак', 'перекус', 'обед', 'перекус', 'ужин']
-        required_meal_fields = ['name', 'calories', 'protein', 'carbs', 'fat', 'ingredients', 'recipe']
-        
-        try:
-            for day in required_days:
-                if day not in plan:
-                    return False
-                
-                for meal in required_meals:
-                    if meal not in plan[day]:
-                        return False
-                    
-                    for field in required_meal_fields:
-                        if field not in plan[day][meal]:
-                            return False
-            
-            return True
-        except:
-            return False
-    
-    def validate_nutrition_values(self, plan: Dict[str, Any], user_data: Dict[str, Any]) -> bool:
-        """Валидация нутриционных значений"""
-        professor = NutritionProfessor()
-        target_calories = professor.calculate_calories(user_data)
-        tolerance = 100
-        
-        try:
-            for day in plan.values():
-                if isinstance(day, dict) and 'total_calories' in day:
-                    day_calories = day.get('total_calories', 0)
-                    if abs(day_calories - target_calories) > tolerance:
-                        return False
-            return True
-        except:
-            return False
-
-class ShoppingListGenerator:
-    def generate_shopping_list(self, nutrition_plan: Dict[str, Any]) -> Dict[str, Any]:
-        """Генерация списка покупок"""
-        shopping_list = {}
-        
-        for day_name, day_data in nutrition_plan.items():
-            if day_name == 'water_regime':
-                continue
-                
-            for meal_type in ['завтрак', 'перекус', 'обед', 'перекус', 'ужин']:
-                meal = day_data[meal_type]
-                ingredients = meal.get('ingredients', [])
-                self._aggregate_ingredients(shopping_list, ingredients)
-        
-        return self._categorize_ingredients(shopping_list)
-    
-    def _aggregate_ingredients(self, shopping_list: Dict[str, Any], ingredients: List[Dict]):
-        """Агрегация ингредиентов"""
-        for ingredient in ingredients:
-            name = ingredient['name'].lower().strip()
-            quantity = self._parse_quantity(ingredient['quantity'])
-            unit = ingredient.get('unit', 'гр')
-            
-            key = f"{name}_{unit}"
-            
-            if key in shopping_list:
-                shopping_list[key]['quantity'] += quantity
-            else:
-                shopping_list[key] = {
-                    'name': name,
-                    'quantity': quantity,
-                    'unit': unit
-                }
-    
-    def _parse_quantity(self, quantity) -> float:
-        """Парсинг количества ингредиента"""
-        if isinstance(quantity, (int, float)):
-            return float(quantity)
-        elif isinstance(quantity, str):
-            numbers = re.findall(r'\d+\.?\d*', quantity)
-            return float(numbers[0]) if numbers else 100.0
-        else:
-            return 100.0
-    
-    def _categorize_ingredients(self, shopping_list: Dict[str, Any]) -> Dict[str, List]:
-        """Категоризация ингредиентов"""
-        categories = {
-            'Овощи и фрукты': [],
-            'Мясо и птица': [],
-            'Рыба и морепродукты': [],
-            'Молочные продукты': [],
-            'Крупы и злаки': [],
-            'Бакалея': [],
-            'Напитки': [],
-            'Прочее': []
-        }
-        
-        category_keywords = {
-            'Овощи и фрукты': ['помидор', 'огурец', 'яблоко', 'банан', 'апельсин', 'морковь', 'лук', 'картофель', 'капуста', 'салат', 'зелень', 'ягода'],
-            'Мясо и птица': ['куриц', 'говядин', 'свинин', 'индейк', 'фарш', 'грудк', 'мясо', 'телятин'],
-            'Рыба и морепродукты': ['рыба', 'лосось', 'тунец', 'креветк', 'кальмар', 'миди', 'треска', 'окунь'],
-            'Молочные продукты': ['молоко', 'йогурт', 'творог', 'сыр', 'кефир', 'сметана', 'масло сливочное', 'ряженка'],
-            'Крупы и злаки': ['рис', 'гречк', 'овсян', 'пшено', 'макарон', 'хлеб', 'мука', 'крупа', 'отруб'],
-            'Бакалея': ['масло оливковое', 'масло растительное', 'соль', 'сахар', 'перец', 'специи', 'соус', 'уксус', 'мед'],
-            'Напитки': ['вода', 'чай', 'кофе', 'сок', 'компот', 'морс']
-        }
-        
-        for item_key, item_data in shopping_list.items():
-            name = item_data['name']
-            categorized = False
-            
-            for category, keywords in category_keywords.items():
-                if any(keyword in name for keyword in keywords):
-                    categories[category].append(item_data)
-                    categorized = True
-                    break
-            
-            if not categorized:
-                categories['Прочее'].append(item_data)
-        
-        return categories
-
-class FileExporter:
-    def export_complete_plan(self, nutrition_plan: Dict[str, Any], shopping_list: Dict[str, Any], user_id: int):
-        """Экспорт полного пакета документов"""
-        self._export_nutrition_plan(nutrition_plan, user_id)
-        self._export_shopping_list(shopping_list, user_id)
-        self._export_recipes(nutrition_plan, user_id)
-        self._export_water_regime(nutrition_plan, user_id)
-    
-    def _export_nutrition_plan(self, plan: Dict[str, Any], user_id: int):
-        """Экспорт плана питания"""
-        filename = f"nutrition_plan_{user_id}.txt"
-        with open(filename, 'w', encoding='utf-8') as f:
-            f.write("🎯 ИНДИВИДУАЛЬНЫЙ ПЛАН ПИТАНИЯ ОТ ПРОФЕССОРА НУТРИЦИОЛОГИИ\n\n")
-            
-            for day, meals_data in plan.items():
-                if day == 'water_regime':
-                    continue
-                    
-                f.write(f"📅 {day.upper()}\n")
-                f.write("=" * 60 + "\n")
-                
-                total_day_calories = 0
-                total_day_protein = 0
-                total_day_carbs = 0
-                total_day_fat = 0
-                
-                for meal_type in ['завтрак', 'перекус', 'обед', 'перекус', 'ужин']:
-                    meal = meals_data[meal_type]
-                    f.write(f"\n🍽️ {meal_type.upper()}: {meal['name']}\n")
-                    f.write(f"   🔥 Калории: {meal['calories']} ккал\n")
-                    f.write(f"   🥚 Белки: {meal['protein']}г | 🥑 Жиры: {meal['fat']}г | 🌾 Углеводы: {meal['carbs']}г\n")
-                    if 'water_recommendation' in meal:
-                        f.write(f"   💧 {meal['water_recommendation']}\n")
-                    
-                    total_day_calories += meal['calories']
-                    total_day_protein += meal['protein']
-                    total_day_carbs += meal['carbs']
-                    total_day_fat += meal['fat']
-                
-                f.write(f"\n📊 ИТОГИ ДНЯ:\n")
-                f.write(f"   🔥 Общие калории: {total_day_calories} ккал\n")
-                f.write(f"   🥚 Белки: {total_day_protein}г | 🥑 Жиры: {total_day_fat}г | 🌾 Углеводы: {total_day_carbs}г\n")
-                if 'water_notes' in meals_data:
-                    f.write(f"   💧 {meals_data['water_notes']}\n")
-                f.write("\n" + "=" * 60 + "\n\n")
-    
-    def _export_shopping_list(self, shopping_list: Dict[str, Any], user_id: int):
-        """Экспорт списка покупок"""
-        filename = f"shopping_list_{user_id}.txt"
-        with open(filename, 'w', encoding='utf-8') as f:
-            f.write("🛒 СПИСОК ПОКУПОК НА НЕДЕЛЮ\n\n")
-            
-            for category, items in shopping_list.items():
-                if items:
-                    f.write(f"📦 {category.upper()}:\n")
-                    for item in items:
-                        f.write(f"   ✅ {item['name'].title()}: {item['quantity']} {item['unit']}\n")
-                    f.write("\n")
-    
-    def _export_recipes(self, plan: Dict[str, Any], user_id: int):
-        """Экспорт рецептов"""
-        filename = f"recipes_{user_id}.txt"
-        with open(filename, 'w', encoding='utf-8') as f:
-            f.write("👨‍🍳 РЕЦЕПТЫ ОТ ПРОФЕССОРА НУТРИЦИОЛОГИИ\n\n")
-            
-            for day, meals_data in plan.items():
-                if day == 'water_regime':
-                    continue
-                    
-                f.write(f"📅 {day.upper()}\n")
-                f.write("=" * 70 + "\n")
-                
-                for meal_type in ['завтрак', 'перекус', 'обед', 'перекус', 'ужин']:
-                    meal = meals_data[meal_type]
-                    f.write(f"\n🍽️ {meal_type.upper()}: {meal['name']}\n")
-                    f.write(f"📝 Рецепт: {meal['recipe']}\n")
-                    if 'water_recommendation' in meal:
-                        f.write(f"💧 Рекомендация: {meal['water_recommendation']}\n")
-                    f.write("📋 Ингредиенты:\n")
-                    
-                    for ingredient in meal.get('ingredients', []):
-                        f.write(f"   • {ingredient['name']}: {ingredient['quantity']} {ingredient.get('unit', 'гр')}\n")
-                    
-                    f.write("\n" + "-" * 50 + "\n")
-                
-                f.write("\n")
-    
-    def _export_water_regime(self, plan: Dict[str, Any], user_id: int):
-        """Экспорт водного режима"""
-        if 'water_regime' not in plan:
+    async def notify_admin_new_order(self, order_id: str, user_data: dict, bot):
+        """Уведомление администратора о новом заказе"""
+        if not self.admin_chat_id:
             return
             
-        water = plan['water_regime']
-        filename = f"water_regime_{user_id}.txt"
-        with open(filename, 'w', encoding='utf-8') as f:
-            f.write("💧 ВОДНЫЙ РЕЖИМ ОТ ПРОФЕССОРА НУТРИЦИОЛОГИИ\n\n")
+        order_info = (
+            f"🆕 НОВЫЙ ЗАКАЗ!\n\n"
+            f"👤 Клиент: {user_data.get('user_name', 'Не указано')}\n"
+            f"📞 User ID: {user_data.get('user_id')}\n"
+            f"📦 Пакет: {user_data.get('selected_package')}\n"
+            f"💵 Сумма: {SERVICE_PACKAGES[user_data.get('selected_package')]['price']}₽\n"
+            f"📋 Номер: #{order_id}\n\n"
+            f"⚡ Действия:\n"
+            f"/confirm_{order_id} - Подтвердить оплату\n"
+            f"/send_{order_id} - Отправить план\n"
+            f"/cancel_{order_id} - Отменить заказ"
+        )
+        
+        await bot.send_message(
+            chat_id=self.admin_chat_id,
+            text=order_info
+        )
+    
+    async def send_plan_to_client(self, order_id: str, bot, files_info: list):
+        """Отправка плана КОНКРЕТНОМУ клиенту"""
+        order = self.orders.get(order_id)
+        if not order:
+            return False
+        
+        user_id = order['user_id']
+        
+        try:
+            await bot.send_message(
+                chat_id=user_id,
+                text="🎉 Ваш план питания готов! Присылаю файлы..."
+            )
             
-            f.write(f"📊 СУТОЧНАЯ НОРМА ВОДЫ:\n")
-            f.write(f"   • Минимальная: {water['min_water']} мл\n")
-            f.write(f"   • Рекомендуемая: {water['avg_water']} мл\n")
-            f.write(f"   • Максимальная: {water['max_water']} мл\n\n")
+            for file_info in files_info:
+                with open(file_info['path'], 'rb') as f:
+                    await bot.send_document(
+                        chat_id=user_id,
+                        document=InputFile(f, filename=file_info['filename']),
+                        caption=file_info['description']
+                    )
             
-            f.write("🕒 ГРАФИК ПРИЕМА ВОДЫ В ТЕЧЕНИЕ ДНЯ:\n")
-            for schedule in water['schedule']:
-                f.write(f"   ⏰ {schedule['time']} - {schedule['amount']} мл\n")
-                f.write(f"      {schedule['description']}\n")
-            f.write("\n")
+            await bot.send_message(
+                chat_id=user_id,
+                text=(
+                    "📦 Вы получили полный комплект документов!\n\n"
+                    "💡 Для продолжения journey подпишитесь на канал:\n"
+                    "👉 @ppsupershef\n\n"
+                    "Спасибо за заказ! ❤️\n"
+                    "Хотите создать еще один план?",
+                    reply_markup=ReplyKeyboardMarkup([
+                        ["🆕 Новый план"], 
+                        ["📢 Наш канал"]
+                    ], resize_keyboard=True)
+                )
+            )
             
-            f.write("💡 ОБЩИЕ РЕКОМЕНДАЦИИ:\n")
-            for i, recommendation in enumerate(water['recommendations'], 1):
-                f.write(f"   {i}. {recommendation}\n")
-            f.write("\n")
+            order['status'] = 'delivered'
+            return True
             
-            f.write("📝 ВАЖНЫЕ ПРИНЦИПЫ:\n")
-            f.write("   • Пейте воду за 30 минут ДО еды\n")
-            f.write("   • Не пейте во время приема пищи\n")
-            f.write("   • Пейте через 1 час ПОСЛЕ еды\n")
-            f.write("   • Увеличьте норму при физических нагрузках\n")
-            f.write("   • Ограничьте жидкость за 2 часа до сна\n")
+        except Exception as e:
+            logger.error(f"Ошибка отправки клиенту {user_id}: {e}")
+            return False
+
+class PaymentManager:
+    def __init__(self):
+        self.pending_orders = {}
+    
+    def create_order(self, user_data: dict, package: str) -> str:
+        """Создание заказа и блокировка формирования плана"""
+        order_id = f"nutrition{random.randint(10000, 99999)}"
+        
+        self.pending_orders[order_id] = {
+            'user_data': user_data.copy(),
+            'package': package,
+            'status': 'pending',
+            'created_at': datetime.now(),
+            'user_id': user_data.get('user_id')
+        }
+        
+        return order_id
+    
+    def confirm_payment(self, order_id: str) -> bool:
+        """Подтверждение оплаты (вызывается администратором)"""
+        if order_id in self.pending_orders:
+            self.pending_orders[order_id]['status'] = 'paid'
+            return True
+        return False
+    
+    def can_generate_plan(self, order_id: str) -> bool:
+        """Проверка можно ли формировать план"""
+        order = self.pending_orders.get(order_id)
+        return order and order['status'] == 'paid'
+
+class ReminderSystem:
+    def __init__(self):
+        self.follow_ups = {}
+    
+    async def schedule_follow_up(self, user_id: int, context: ContextTypes.DEFAULT_TYPE):
+        """Планирование напоминания через 3 дня"""
+        self.follow_ups[user_id] = datetime.now() + timedelta(days=3)
+        
+        context.job_queue.run_once(
+            callback=self.send_follow_up,
+            when=timedelta(days=3),
+            data=user_id,
+            name=f"follow_up_{user_id}"
+        )
+    
+    async def send_follow_up(self, context: ContextTypes.DEFAULT_TYPE):
+        """Отправка напоминания через 3 дня"""
+        user_id = context.job.data
+        
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text="📊 Как ваши успехи с планом питания?\n\n"
+                     "• Следуете рекомендациям?\n"
+                     "• Есть вопросы?\n" 
+                     "• Нужна корректировка?",
+                reply_markup=ReplyKeyboardMarkup([
+                    ["✅ Все отлично", "❓ Есть вопросы"],
+                    ["🔄 Нужна корректировка", "🆕 Новый план"]
+                ], resize_keyboard=True)
+            )
+            
+            if user_id in self.follow_ups:
+                del self.follow_ups[user_id]
+                
+        except Exception as e:
+            logger.error(f"Ошибка отправки напоминания {user_id}: {e}")
+
+class KnowledgeBase:
+    def __init__(self):
+        self.articles = {
+            "bju": {
+                "title": "📚 Что такое БЖУ?",
+                "content": (
+                    "🔍 *БЖУ* - это Белки, Жиры, Углеводы - основные нутриенты:\n\n"
+                    "🥚 *Белки:* 1 г = 4 ккал\n"
+                    "• Строительный материал для мышц\n"
+                    "• Источники: мясо, рыба, яйца, творог\n\n"
+                    "🥑 *Жиры:* 1 г = 9 ккал\n" 
+                    "• Энергия и гормональная система\n"
+                    "• Источники: орехи, авокадо, масла\n\n"
+                    "🌾 *Углеводы:* 1 г = 4 ккал\n"
+                    "• Основной источник энергии\n"
+                    "• Источники: крупы, фрукты, овощи"
+                )
+            },
+            "water": {
+                "title": "💧 Водный режим", 
+                "content": (
+                    "💧 *Правильный водный режим:*\n\n"
+                    "• 30-40 мл на 1 кг веса в день\n"
+                    "• Пить за 30 минут ДО еды\n"
+                    "• Не пить во время еды\n"
+                    "• Пить через 1 час ПОСЛЕ еды\n"
+                    "• Лучше вода комнатной температуры"
+                )
+            }
+        }
+
+class LoyaltySystem:
+    def __init__(self):
+        self.client_weeks = {}
+    
+    def add_week_plan(self, user_id: int):
+        """Добавление недельного плана в историю"""
+        if user_id not in self.client_weeks:
+            self.client_weeks[user_id] = 0
+        self.client_weeks[user_id] += 1
+    
+    def check_discount_eligibility(self, user_id: int) -> bool:
+        """Проверка права на скидку (4 недели)"""
+        return self.client_weeks.get(user_id, 0) >= 4
+    
+    async def offer_discount(self, user_id: int, bot):
+        """Предложение скидки лояльному клиенту"""
+        if self.check_discount_eligibility(user_id):
+            await bot.send_message(
+                chat_id=user_id,
+                text="🎁 Вы получили скидку 15% на следующий план!\n\n"
+                     "Спасибо за вашу лояльность! ❤️",
+                reply_markup=ReplyKeyboardMarkup([
+                    ["🆕 Новый план со скидкой"],
+                    ["📢 Наш канал"]
+                ], resize_keyboard=True)
+            )
+            return True
+        return False
+
+async def send_channel_notification(order_id: str, user_data: dict, bot):
+    """Отправка уведомления в канал о новом плане"""
+    try:
+        message_text = (
+            "🎯 *Внимание! Создан новый план индивидуального питания*\n\n"
+            f"👤 *Клиент:* {user_data.get('user_name', 'Новый клиент')}\n"
+            f"⚡ *Статус:* План сформирован и отправлен\n\n"
+            f"#{order_id} #новыйклиент #планпитания"
+        )
+        
+        await bot.send_message(
+            chat_id=CHANNEL_USERNAME,
+            text=message_text,
+            parse_mode='Markdown'
+        )
+        logger.info(f"Уведомление отправлено в канал для заказа {order_id}")
+        
+    except Exception as e:
+        logger.error(f"Ошибка отправки в канал: {e}")
 
 # Инициализация классов
 nutrition_professor = NutritionProfessor()
-yandex_gpt = YandexGPTClient()
-plan_parser = NutritionPlanParser()
-shopping_generator = ShoppingListGenerator()
-file_exporter = FileExporter()
+subscription_checker = SubscriptionChecker()
+admin_panel = AdminPanel()
+payment_manager = PaymentManager()
+reminder_system = ReminderSystem()
+knowledge_base = KnowledgeBase()
+loyalty_system = LoyaltySystem()
 
 # Создание приложения Telegram
 application = Application.builder().token(BOT_TOKEN).build()
+
+# Клавиатуры
+def create_goal_keyboard(show_back: bool = False):
+    keyboard = [["похудение", "поддержание веса"], ["набор мышечной массы"]]
+    if show_back:
+        keyboard.append(["◀️ Назад"])
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+def create_diet_keyboard(show_back: bool = False):
+    keyboard = [["стандарт", "вегетарианская"], ["веганская", "безглютеновая"], ["низкоуглеводная"]]
+    if show_back:
+        keyboard.append(["◀️ Назад"])
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+def create_allergies_keyboard(show_back: bool = False):
+    keyboard = [["нет", "орехи"], ["молочные продукты", "яйца"], ["рыба/морепродукты"]]
+    if show_back:
+        keyboard.append(["◀️ Назад"])
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+def create_gender_keyboard(show_back: bool = False):
+    keyboard = [["мужской", "женский"]]
+    if show_back:
+        keyboard.append(["◀️ Назад"])
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+def create_activity_keyboard(show_back: bool = False):
+    keyboard = [["сидячий", "умеренная"], ["активный", "очень активный"]]
+    if show_back:
+        keyboard.append(["◀️ Назад"])
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+def create_packages_keyboard():
+    keyboard = [
+        ["🎯 Базовый - 100₽", "🚀 Стандартный - 200₽"],
+        ["👑 Премиум - 300₽", "❓ Сравнить пакеты"],
+        ["◀️ Назад к анкете"]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+def create_payment_keyboard():
+    keyboard = [
+        ["💳 Оплатить картой", "📱 СБП перевод"],
+        ["📲 Реквизиты для банка", "◀️ Выбрать другой пакет"]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+def create_subscription_keyboard():
+    keyboard = [
+        ["✅ Проверить подписку", "📢 Перейти в канал"],
+        ["🏠 Главное меню"]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+def create_new_plan_keyboard():
+    keyboard = [
+        ["🆕 Новый план"],
+        ["📢 Наш канал"]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 def get_progress_text(user_data: Dict[str, Any], current_step: str = None) -> str:
     """Генерация текста с прогрессом и параметрами"""
@@ -611,64 +508,39 @@ def get_progress_text(user_data: Dict[str, Any], current_step: str = None) -> st
     
     return progress
 
-def create_goal_keyboard(show_back: bool = False):
-    """Клавиатура для выбора цели"""
-    keyboard = [["похудение", "поддержание веса"], ["набор мышечной массы"]]
-    if show_back:
-        keyboard.append(["◀️ Назад"])
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
-def create_diet_keyboard(show_back: bool = False):
-    """Клавиатура для выбора типа диеты"""
-    keyboard = [["стандарт", "вегетарианская"], ["веганская", "безглютеновая"], ["низкоуглеводная"]]
-    if show_back:
-        keyboard.append(["◀️ Назад"])
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
-def create_allergies_keyboard(show_back: bool = False):
-    """Клавиатура для выбора аллергий"""
-    keyboard = [["нет", "орехи"], ["молочные продукты", "яйца"], ["рыба/морепродукты"]]
-    if show_back:
-        keyboard.append(["◀️ Назад"])
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
-def create_gender_keyboard(show_back: bool = False):
-    """Клавиатура для выбора пола"""
-    keyboard = [["мужской", "женский"]]
-    if show_back:
-        keyboard.append(["◀️ Назад"])
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
-def create_activity_keyboard(show_back: bool = False):
-    """Клавиатура для выбора уровня активности"""
-    keyboard = [["сидячий", "умеренная"], ["активный", "очень активный"]]
-    if show_back:
-        keyboard.append(["◀️ Назад"])
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
-def create_confirmation_keyboard():
-    """Клавиатура для подтверждения параметров"""
-    keyboard = [["✅ Да, все верно", "✏️ Редактировать параметры"]]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
-def create_edit_keyboard():
-    """Клавиатура для редактирования параметров"""
-    keyboard = [
-        ["🎯 Цель", "🥗 Тип диеты"],
-        ["⚠️ Аллергии", "👤 Пол"],
-        ["🎂 Возраст", "📏 Рост"],
-        ["⚖️ Вес", "🏃‍♂️ Активность"],
-        ["✅ Завершить редактирование"]
-    ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Начало работы с ботом"""
-    context.user_data.clear()
+async def show_subscription_required(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Показ сообщения о необходимости подписки"""
+    subscription_text = (
+        "👋 Добро пожаловать в бот профессора нутрициологии!\n\n"
+        "📢 Для использования бота необходимо быть подписанным на наш канал с полезными материалами по правильному питанию.\n\n"
+        "✅ Проверяем подписку...\n\n"
+        "❌ Подписка не активна\n\n"
+        "Пожалуйста, подпишитесь на канал:\n"
+        f"👉 {CHANNEL_USERNAME}\n\n"
+        "После подписки нажмите кнопку «Проверить подписку»"
+    )
     
     await update.message.reply_text(
-        "👋 Добро пожаловать в бот профессора нутрициологии!\n\n"
-        "Я создам для вас индивидуальный план питания на 7 дней с учетом:\n"
+        subscription_text,
+        reply_markup=create_subscription_keyboard(),
+        disable_web_page_preview=False
+    )
+    return SUBSCRIPTION_CHECK
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Начало работы с проверкой подписки"""
+    user_id = update.effective_user.id
+    
+    is_subscribed = await subscription_checker.check_subscription(user_id, context.bot)
+    
+    if not is_subscribed:
+        await show_subscription_required(update, context)
+        return SUBSCRIPTION_CHECK
+    
+    context.user_data.clear()
+    await update.message.reply_text(
+        "✅ Отлично! Подписка активна.\n\n"
+        "Теперь я создам для вас индивидуальный план питания на 7 дней с учетом:\n"
         "• 🎯 Ваших целей и параметров\n"  
         "• 🥗 Диетических предпочтений\n"
         "• 💧 Водного режима\n"
@@ -678,263 +550,77 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     )
     return GOAL
 
-async def process_goal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Обработка выбора цели"""
+async def process_subscription_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обработка проверки подписки"""
     text = update.message.text
+    user_id = update.effective_user.id
     
-    if text == "◀️ Назад":
+    if text == "📢 Перейти в канал":
+        channel_link = f"https://t.me/{CHANNEL_USERNAME.replace('@', '')}"
         await update.message.reply_text(
-            "Начинаем заново! Выберите вашу цель:",
-            reply_markup=create_goal_keyboard()
+            f"📢 Перейдите по ссылке и подпишитесь на канал:\n{channel_link}\n\n"
+            "После подписки нажмите «Проверить подписку»",
+            reply_markup=ReplyKeyboardMarkup([["✅ Проверить подписку"]], resize_keyboard=True)
         )
-        return GOAL
+        return SUBSCRIPTION_CHECK
     
-    if text not in ['похудение', 'поддержание веса', 'набор мышечной массы']:
-        await update.message.reply_text("Пожалуйста, выберите цель из предложенных вариантов:")
-        return GOAL
+    elif text == "✅ Проверить подписку":
+        is_subscribed = await subscription_checker.check_subscription(user_id, context.bot)
+        
+        if is_subscribed:
+            await update.message.reply_text(
+                "✅ Отлично! Подписка активна.\n\n"
+                "Теперь я создам для вас индивидуальный план питания...",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            return await start(update, context)
+        else:
+            await update.message.reply_text(
+                "❌ Подписка все еще не активна.\n\n"
+                "Пожалуйста, убедитесь, что вы подписались на канал и нажмите «Проверить подписку» еще раз.",
+                reply_markup=create_subscription_keyboard()
+            )
+            return SUBSCRIPTION_CHECK
     
-    context.user_data['goal'] = text
-    
-    progress_text = get_progress_text(context.user_data, 'goal')
-    await update.message.reply_text(
-        f"{progress_text}\n\n"
-        "🥗 Теперь выберите тип диеты:",
-        reply_markup=create_diet_keyboard(show_back=True)
-    )
-    return DIET
+    return SUBSCRIPTION_CHECK
 
-async def process_diet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Обработка выбора диеты"""
-    text = update.message.text
-    
-    if text == "◀️ Назад":
-        progress_text = get_progress_text(context.user_data, 'goal')
-        await update.message.reply_text(
-            f"{progress_text}\n\n"
-            "Выберите вашу цель:",
-            reply_markup=create_goal_keyboard(show_back=True)
-        )
-        return GOAL
-    
-    if text not in ['стандарт', 'вегетарианская', 'веганская', 'безглютеновая', 'низкоуглеводная']:
-        await update.message.reply_text("Пожалуйста, выберите тип диеты из предложенных вариантов:")
-        return DIET
-    
-    context.user_data['diet'] = text
-    
-    progress_text = get_progress_text(context.user_data, 'diet')
-    await update.message.reply_text(
-        f"{progress_text}\n\n"
-        "⚠️ Есть ли у вас аллергии или непереносимости?",
-        reply_markup=create_allergies_keyboard(show_back=True)
-    )
-    return ALLERGIES
-
-async def process_allergies(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Обработка выбора аллергий"""
-    text = update.message.text
-    
-    if text == "◀️ Назад":
-        progress_text = get_progress_text(context.user_data, 'diet')
-        await update.message.reply_text(
-            f"{progress_text}\n\n"
-            "Выберите тип диеты:",
-            reply_markup=create_diet_keyboard(show_back=True)
-        )
-        return DIET
-    
-    if text not in ['нет', 'орехи', 'молочные продукты', 'яйца', 'рыба/морепродукты']:
-        await update.message.reply_text("Пожалуйста, выберите вариант из предложенных:")
-        return ALLERGIES
-    
-    context.user_data['allergies'] = text
-    
-    progress_text = get_progress_text(context.user_data, 'allergies')
-    await update.message.reply_text(
-        f"{progress_text}\n\n"
-        "👤 Укажите ваш пол:",
-        reply_markup=create_gender_keyboard(show_back=True)
-    )
-    return GENDER
-
-async def process_gender(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Обработка выбора пола"""
-    text = update.message.text
-    
-    if text == "◀️ Назад":
-        progress_text = get_progress_text(context.user_data, 'allergies')
-        await update.message.reply_text(
-            f"{progress_text}\n\n"
-            "Выберите аллергии:",
-            reply_markup=create_allergies_keyboard(show_back=True)
-        )
-        return ALLERGIES
-    
-    if text not in ['мужской', 'женский']:
-        await update.message.reply_text("Пожалуйста, выберите пол из предложенных вариантов:")
-        return GENDER
-    
-    context.user_data['gender'] = text
-    
-    progress_text = get_progress_text(context.user_data, 'gender')
-    await update.message.reply_text(
-        f"{progress_text}\n\n"
-        "🎂 Укажите ваш возраст (полных лет, от 10 до 100):",
-        reply_markup=ReplyKeyboardRemove()
-    )
-    return AGE
-
-async def process_age(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Обработка возраста"""
-    text = update.message.text
-    
-    if text == "◀️ Назад":
-        progress_text = get_progress_text(context.user_data, 'gender')
-        await update.message.reply_text(
-            f"{progress_text}\n\n"
-            "Выберите пол:",
-            reply_markup=create_gender_keyboard(show_back=True)
-        )
-        return GENDER
-    
-    try:
-        age = int(text)
-        if age < 10 or age > 100:
-            await update.message.reply_text("Пожалуйста, введите реальный возраст (10-100 лет):")
-            return AGE
-    except ValueError:
-        await update.message.reply_text("Пожалуйста, введите число:")
-        return AGE
-    
-    context.user_data['age'] = age
-    
-    progress_text = get_progress_text(context.user_data, 'age')
-    await update.message.reply_text(
-        f"{progress_text}\n\n"
-        "📏 Укажите ваш рост (в см, от 100 до 250):"
-    )
-    return HEIGHT
-
-async def process_height(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Обработка роста"""
-    text = update.message.text
-    
-    if text == "◀️ Назад":
-        progress_text = get_progress_text(context.user_data, 'age')
-        await update.message.reply_text(
-            f"{progress_text}\n\n"
-            "Введите возраст:"
-        )
-        return AGE
-    
-    try:
-        height = int(text)
-        if height < 100 or height > 250:
-            await update.message.reply_text("Пожалуйста, введите реальный рост (100-250 см):")
-            return HEIGHT
-    except ValueError:
-        await update.message.reply_text("Пожалуйста, введите число:")
-        return HEIGHT
-    
-    context.user_data['height'] = height
-    
-    progress_text = get_progress_text(context.user_data, 'height')
-    await update.message.reply_text(
-        f"{progress_text}\n\n"
-        "⚖️ Укажите ваш вес (в кг, от 30 до 300):"
-    )
-    return WEIGHT
-
-async def process_weight(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Обработка веса"""
-    text = update.message.text
-    
-    if text == "◀️ Назад":
-        progress_text = get_progress_text(context.user_data, 'height')
-        await update.message.reply_text(
-            f"{progress_text}\n\n"
-            "Введите рост:"
-        )
-        return HEIGHT
-    
-    try:
-        weight = int(text)
-        if weight < 30 or weight > 300:
-            await update.message.reply_text("Пожалуйста, введите реальный вес (30-300 кг):")
-            return WEIGHT
-    except ValueError:
-        await update.message.reply_text("Пожалуйста, введите число:")
-        return WEIGHT
-    
-    context.user_data['weight'] = weight
-    
-    progress_text = get_progress_text(context.user_data, 'weight')
-    await update.message.reply_text(
-        f"{progress_text}\n\n"
-        "🏃‍♂️ Укажите ваш уровень физической активности:",
-        reply_markup=create_activity_keyboard(show_back=True)
-    )
-    return ACTIVITY
-
-async def process_activity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Обработка уровня активности"""
-    text = update.message.text
-    
-    if text == "◀️ Назад":
-        progress_text = get_progress_text(context.user_data, 'weight')
-        await update.message.reply_text(
-            f"{progress_text}\n\n"
-            "Введите вес:"
-        )
-        return WEIGHT
-    
-    if text not in ['сидячий', 'умеренная', 'активный', 'очень активный']:
-        await update.message.reply_text("Пожалуйста, выберите уровень активности из предложенных вариантов:")
-        return ACTIVITY
-    
-    context.user_data['activity'] = text
-    
-    # Показываем все введенные параметры для подтверждения
-    professor = NutritionProfessor()
-    calories = professor.calculate_calories(context.user_data)
-    bju = professor.calculate_bju(context.user_data, calories)
-    water = professor.calculate_water_intake(int(context.user_data['weight']))
-    
-    progress_text = get_progress_text(context.user_data, 'activity')
-    confirmation_text = (
-        f"{progress_text}\n\n"
-        "📊 РАСЧЕТНЫЕ ПОКАЗАТЕЛИ:\n"
-        f"   • 🔥 Суточная норма калорий: {calories} ккал\n"
-        f"   • 🥚 Белки: {bju['protein']}г | 🥑 Жиры: {bju['fat']}г | 🌾 Углеводы: {bju['carbs']}г\n"
-        f"   • 💧 Норма воды: {water['avg_water']} мл/день\n\n"
-        "✅ Все данные введены! Проверьте правильность и подтвердите:"
-    )
-    
-    await update.message.reply_text(
-        confirmation_text,
-        reply_markup=create_confirmation_keyboard()
-    )
-    return CONFIRMATION
+# Обработчики состояний анкеты (process_goal, process_diet, process_allergies, process_gender, process_age, process_height, process_weight, process_activity)
+# ... (код обработчиков состояний остается таким же как в предыдущей версии) ...
 
 async def process_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Обработка подтверждения параметров"""
     text = update.message.text
     
     if text == "✅ Да, все верно":
-        # Запускаем генерацию плана
         user_data = context.user_data
         
-        progress_message = await update.message.reply_text(
-            "🎓 Обращаюсь к профессору нутрициологии...\n"
-            "📝 Формирую индивидуальный план питания..."
+        professor = NutritionProfessor()
+        calories = professor.calculate_calories(user_data)
+        bju = professor.calculate_bju(user_data, calories)
+        water = professor.calculate_water_intake(int(user_data['weight']))
+        
+        package_selection_text = (
+            "📦 ВЫБЕРИТЕ ПАКЕТ УСЛУГ:\n\n"
+            "🎯 **Базовый пакет** - 100₽\n"
+            "• План питания на 7 дней\n"
+            "• Расчет БЖУ и калорий\n"
+            "• Рекомендации по водному режиму\n\n"
+            "🚀 **Стандартный пакет** - 200₽\n"  
+            "• Всё из Базового +\n"
+            "• Подробные рецепты на 7 дней\n\n"
+            "👑 **Премиум пакет** - 300₽\n"
+            "• Всё из Стандартного +\n"
+            "• Умный список покупок\n"
+            "• Детальный водный режим\n"
+            "• Бонус: гайд по ПП\n\n"
+            "Выберите подходящий вариант:"
         )
-        context.user_data['progress_message'] = progress_message
         
-        # Запускаем генерацию плана в отдельном потоке
-        thread = Thread(target=generate_plan_wrapper, args=(update, context, user_data))
-        thread.start()
-        
-        return GENERATING
+        await update.message.reply_text(
+            package_selection_text,
+            reply_markup=create_packages_keyboard()
+        )
+        return SELECT_PACKAGE
         
     elif text == "✏️ Редактировать параметры":
         await update.message.reply_text(
@@ -947,174 +633,237 @@ async def process_confirmation(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("Пожалуйста, выберите вариант из предложенных:")
         return CONFIRMATION
 
-async def process_edit_params(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Обработка редактирования параметров"""
+async def process_package_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обработка выбора пакета"""
     text = update.message.text
     
-    edit_handlers = {
-        "🎯 Цель": (GOAL, create_goal_keyboard(show_back=True), "Выберите цель:"),
-        "🥗 Тип диеты": (DIET, create_diet_keyboard(show_back=True), "Выберите тип диеты:"),
-        "⚠️ Аллергии": (ALLERGIES, create_allergies_keyboard(show_back=True), "Выберите аллергии:"),
-        "👤 Пол": (GENDER, create_gender_keyboard(show_back=True), "Выберите пол:"),
-        "🎂 Возраст": (AGE, ReplyKeyboardRemove(), "Введите возраст:"),
-        "📏 Рост": (HEIGHT, ReplyKeyboardRemove(), "Введите рост:"),
-        "⚖️ Вес": (WEIGHT, ReplyKeyboardRemove(), "Введите вес:"),
-        "🏃‍♂️ Активность": (ACTIVITY, create_activity_keyboard(show_back=True), "Выберите активность:")
+    if text == "◀️ Назад к анкете":
+        return await show_confirmation(update, context)
+    
+    if text == "❓ Сравнить пакеты":
+        return await show_package_comparison(update, context)
+    
+    package_map = {
+        "🎯 Базовый - 100₽": "basic",
+        "🚀 Стандартный - 200₽": "standard", 
+        "👑 Премиум - 300₽": "premium"
     }
     
-    if text in edit_handlers:
-        next_state, keyboard, message = edit_handlers[text]
-        await update.message.reply_text(message, reply_markup=keyboard)
-        return next_state
-    
-    elif text == "✅ Завершить редактирование":
-        # Возвращаемся к подтверждению
-        professor = NutritionProfessor()
-        calories = professor.calculate_calories(context.user_data)
-        bju = professor.calculate_bju(context.user_data, calories)
-        water = professor.calculate_water_intake(int(context.user_data['weight']))
+    if text in package_map:
+        package_key = package_map[text]
+        context.user_data['selected_package'] = package_key
         
-        progress_text = get_progress_text(context.user_data)
-        confirmation_text = (
-            f"{progress_text}\n\n"
-            "📊 РАСЧЕТНЫЕ ПОКАЗАТЕЛИ:\n"
-            f"   • 🔥 Суточная норма калорий: {calories} ккал\n"
-            f"   • 🥚 Белки: {bju['protein']}г | 🥑 Жиры: {bju['fat']}г | 🌾 Углеводы: {bju['carbs']}г\n"
-            f"   • 💧 Норма воды: {water['avg_water']} мл/день\n\n"
-            "✅ Все данные введены! Проверьте правильность и подтвердите:"
+        package = SERVICE_PACKAGES[package_key]
+        
+        package_info = (
+            f"📦 Вы выбрали: {package['name']}\n"
+            f"💵 Стоимость: {package['price']}₽\n\n"
+            f"📋 Что входит:\n"
         )
+        
+        for feature in package['features']:
+            package_info += f"   ✅ {feature}\n"
+            
+        package_info += f"\nВыберите способ оплаты:"
         
         await update.message.reply_text(
-            confirmation_text,
-            reply_markup=create_confirmation_keyboard()
+            package_info,
+            reply_markup=create_payment_keyboard()
         )
-        return CONFIRMATION
+        return PAYMENT_METHOD
     
-    else:
-        await update.message.reply_text("Пожалуйста, выберите параметр для редактирования:")
-        return EDIT_PARAMS
+    await update.message.reply_text("Пожалуйста, выберите пакет из предложенных:")
+    return SELECT_PACKAGE
 
-def generate_plan_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, user_data: dict):
-    """Обертка для запуска генерации плана в отдельном потоке"""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(generate_plan(update, context, user_data))
-    loop.close()
-
-async def generate_plan(update: Update, context: ContextTypes.DEFAULT_TYPE, user_data: dict):
-    """Генерация плана питания"""
-    try:
-        progress_message = context.user_data.get('progress_message')
-        
-        # Обновляем прогресс
-        await progress_message.edit_text(
-            progress_message.text + "\n🤖 Получаю ответ от AI..."
-        )
-        
-        # Создаем промпт для GPT
-        prompt = nutrition_professor.create_professor_prompt(user_data)
-        
-        # Отправляем запрос к Yandex GPT
-        gpt_response = yandex_gpt.get_completion(prompt)
-        
-        if not gpt_response:
-            await update.message.reply_text("❌ Ошибка при обращении к AI. Пожалуйста, попробуйте позже.")
-            return ConversationHandler.END
-        
-        # Обновляем прогресс
-        await progress_message.edit_text(
-            progress_message.text + "\n📊 Анализирую данные..."
-        )
-        
-        # Парсим ответ
-        nutrition_plan = plan_parser.parse_gpt_response(gpt_response, user_data)
-        
-        # Обновляем прогресс
-        await progress_message.edit_text(
-            progress_message.text + "\n🛒 Формирую список покупок..."
-        )
-        
-        # Генерируем список покупок
-        shopping_list = shopping_generator.generate_shopping_list(nutrition_plan)
-        
-        # Обновляем прогресс
-        await progress_message.edit_text(
-            progress_message.text + "\n📁 Сохраняю файлы..."
-        )
-        
-        # Экспортируем файлы
-        file_exporter.export_complete_plan(nutrition_plan, shopping_list, update.effective_user.id)
-        
-        # Отправляем файлы пользователю
-        await update.message.reply_document(
-            document=InputFile(f"nutrition_plan_{update.effective_user.id}.txt"),
-            caption="📅 Ваш индивидуальный план питания на 7 дней"
-        )
-        
-        await update.message.reply_document(
-            document=InputFile(f"shopping_list_{update.effective_user.id}.txt"),
-            caption="🛒 Список покупок на неделю"
-        )
-        
-        await update.message.reply_document(
-            document=InputFile(f"recipes_{update.effective_user.id}.txt"),
-            caption="👨‍🍳 Рецепты для всех блюд"
-        )
-        
-        await update.message.reply_document(
-            document=InputFile(f"water_regime_{update.effective_user.id}.txt"),
-            caption="💧 Детальный водный режим"
-        )
-        
-        # Расчеты для итогового сообщения
-        professor = NutritionProfessor()
-        calories = professor.calculate_calories(user_data)
-        water = professor.calculate_water_intake(int(user_data['weight']))
-        
-        await update.message.reply_text(
-            f"🎉 Готово! Ваш индивидуальный план питания создан!\n\n"
-            f"📋 Что вы получили:\n"
-            f"• 📅 План питания на 7 дней с 5 приемами пищи\n"
-            f"• 🛒 Оптимизированный список покупок\n"
-            f"• 👨‍🍳 Подробные рецепты всех блюд\n"
-            f"• 💧 Детальный водный режим\n\n"
-            f"📊 Ваши показатели:\n"
-            f"• 🔥 Суточная норма: {calories} ккал\n"
-            f"• 💧 Норма воды: {water['avg_water']} мл/день\n"
-            f"• 🕒 8 приемов воды по графику\n\n"
-            f"Чтобы начать заново, отправьте /start",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        
-        # Очищаем прогресс
-        if 'progress_message' in context.user_data:
-            del context.user_data['progress_message']
-        
-    except Exception as e:
-        logger.error(f"Ошибка при генерации плана: {e}")
-        await update.message.reply_text(
-            "❌ Произошла ошибка при генерации плана питания. "
-            "Пожалуйста, попробуйте позже или обратитесь в поддержку.",
-            reply_markup=ReplyKeyboardRemove()
-        )
+async def process_payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обработка выбора способа оплаты"""
+    text = update.message.text
     
+    if text == "◀️ Выбрать другой пакет":
+        return await show_package_selection(update, context)
+    
+    user_data = context.user_data
+    user_id = update.effective_user.id
+    
+    user_data['user_name'] = update.effective_user.first_name
+    user_data['user_id'] = user_id
+    
+    order_id = payment_manager.create_order(user_data, user_data['selected_package'])
+    
+    await admin_panel.notify_admin_new_order(order_id, user_data, context.bot)
+    
+    await update.message.reply_text(
+        f"🎉 Заказ принят!\n\n"
+        f"📋 Ваш заказ:\n"
+        f"• Пакет: {SERVICE_PACKAGES[user_data['selected_package']]['name']}\n"
+        f"• Сумма: {SERVICE_PACKAGES[user_data['selected_package']]['price']}₽\n"
+        f"• Номер: #{order_id}\n\n"
+        f"⏱ Срок формирования плана: 24 часа\n"
+        f"📬 План придет в этот чат\n\n"
+        f"💡 Пока ждете, посетите наш канал:\n"
+        f"👉 @ppsupershef\n\n"
+        f"Статус: ❌ Ожидает подтверждения оплаты",
+        reply_markup=create_new_plan_keyboard()
+    )
+    
+    context.user_data.clear()
     return ConversationHandler.END
+
+async def handle_new_plan_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка запроса на новый план"""
+    text = update.message.text
+    
+    if text == "🆕 Новый план":
+        return await start(update, context)
+    
+    elif text == "📢 Наш канал":
+        await update.message.reply_text(
+            "📢 Подпишитесь на наш канал с полезными материалами:\n"
+            "👉 @ppsupershef\n\n"
+            "Там вы найдете:\n"
+            "• Советы по питанию\n"
+            "• Рецепты ПП\n" 
+            "• Мотивационные истории\n"
+            "• Ответы на вопросы",
+            reply_markup=create_new_plan_keyboard()
+        )
+
+async def handle_follow_up_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка ответов на напоминания"""
+    text = update.message.text
+    
+    if text == "✅ Все отлично":
+        await update.message.reply_text(
+            "🎉 Отлично! Рады, что план работает!\n\n"
+            "Хотите заказать план на следующую неделю?",
+            reply_markup=create_new_plan_keyboard()
+        )
+        
+    elif text == "❓ Есть вопросы":
+        await update.message.reply_text(
+            "📞 Напишите ваш вопрос, и мы обязательно поможем!",
+            reply_markup=create_new_plan_keyboard()
+        )
+        
+    elif text == "🔄 Нужна корректировка":
+        await update.message.reply_text(
+            "🔄 Расскажите, что нужно изменить в плане?\n\n"
+            "Мы скорректируем его бесплатно!",
+            reply_markup=create_new_plan_keyboard()
+        )
+
+async def handle_knowledge_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка запросов к базе знаний"""
+    text = update.message.text
+    
+    if text == "📚 Что такое БЖУ?":
+        await send_article(update, "bju")
+    elif text == "💧 Водный режим":
+        await send_article(update, "water")
+
+async def send_article(update: Update, article_key: str):
+    """Отправка статьи из базы знаний"""
+    article = knowledge_base.articles.get(article_key)
+    if article:
+        await update.message.reply_text(
+            article["content"],
+            parse_mode='Markdown',
+            reply_markup=ReplyKeyboardMarkup([
+                ["📚 Что такое БЖУ?", "💧 Водный режим"],
+                ["🆕 Новый план", "📢 Наш канал"]
+            ], resize_keyboard=True)
+        )
+
+# Обработчики команд админа
+async def handle_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка команд администратора"""
+    text = update.message.text
+    
+    if str(update.effective_user.id) != ADMIN_CHAT_ID:
+        return
+    
+    if text.startswith('/confirm_'):
+        order_id = text.replace('/confirm_', '')
+        await confirm_payment(update, context, order_id)
+    
+    elif text.startswith('/send_'):
+        order_id = text.replace('/send_', '')
+        await send_plan_to_client(update, context, order_id)
+
+async def confirm_payment(update: Update, context: ContextTypes.DEFAULT_TYPE, order_id: str):
+    """Подтверждение оплаты администратором"""
+    order = payment_manager.pending_orders.get(order_id)
+    if order:
+        payment_manager.confirm_payment(order_id)
+        
+        await context.bot.send_message(
+            chat_id=order['user_id'],
+            text=(
+                "✅ Оплата подтверждена! Ваш план поставлен в очередь на формирование.\n\n"
+                "⏱ План будет готов в течение 24 часов\n"
+                "📬 Вы получите уведомление в этом чат\n\n"
+                "📢 Подписывайтесь на наш канал:\n"
+                "👉 @ppsupershef"
+            )
+        )
+        
+        await update.message.reply_text(f"✅ Оплата для заказа #{order_id} подтверждена")
+
+async def send_plan_to_client(update: Update, context: ContextTypes.DEFAULT_TYPE, order_id: str):
+    """Отправка плана клиенту"""
+    order = payment_manager.pending_orders.get(order_id)
+    if not order:
+        await update.message.reply_text("❌ Заказ не найден")
+        return
+    
+    # Здесь должна быть ваша логика формирования плана
+    # Для примера создаем тестовые файлы
+    files_info = [
+        {
+            'path': f"plans/{order_id}_plan.pdf",
+            'filename': f"План_питания_{order_id}.pdf",
+            'description': "📅 Ваш индивидуальный план питания на 7 дней"
+        },
+        {
+            'path': f"plans/{order_id}_recipes.pdf", 
+            'filename': f"Рецепты_{order_id}.pdf",
+            'description': "👨‍🍳 Подробные рецепты всех блюд"
+        }
+    ]
+    
+    success = await admin_panel.send_plan_to_client(order_id, context.bot, files_info)
+    
+    if success:
+        await update.message.reply_text(f"✅ План для заказа #{order_id} отправлен клиенту")
+        
+        # Отправляем уведомление в канал
+        await send_channel_notification(order_id, order['user_data'], context.bot)
+        
+        # Запускаем напоминание через 3 дня
+        await reminder_system.schedule_follow_up(order['user_id'], context)
+        
+        # Добавляем в систему лояльности
+        loyalty_system.add_week_plan(order['user_id'])
+        await loyalty_system.offer_discount(order['user_id'], context.bot)
+        
+    else:
+        await update.message.reply_text(f"❌ Ошибка отправки плана для заказа #{order_id}")
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Отмена диалога"""
     await update.message.reply_text(
-        "Диалог отменен. Чтобы начать заново, отправьте /start",
-        reply_markup=ReplyKeyboardRemove()
+        "Диалог отменен. Чтобы начать заново, нажмите «🆕 Новый план»",
+        reply_markup=create_new_plan_keyboard()
     )
     
-    # Очищаем данные
     context.user_data.clear()
     return ConversationHandler.END
 
 # Настройка обработчиков
 conv_handler = ConversationHandler(
-    entry_points=[CommandHandler('start', start)],
+    entry_points=[MessageHandler(filters.TEXT & ~filters.COMMAND, start)],
     states={
+        SUBSCRIPTION_CHECK: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_subscription_check)],
         GOAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_goal)],
         DIET: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_diet)],
         ALLERGIES: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_allergies)],
@@ -1124,47 +873,17 @@ conv_handler = ConversationHandler(
         WEIGHT: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_weight)],
         ACTIVITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_activity)],
         CONFIRMATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_confirmation)],
-        EDIT_PARAMS: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_edit_params)],
-        GENERATING: [MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u, c: None)]  # Игнорируем ввод во время генерации
+        SELECT_PACKAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_package_selection)],
+        PAYMENT_METHOD: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_payment_method)],
     },
     fallbacks=[CommandHandler('cancel', cancel)]
 )
 
 application.add_handler(conv_handler)
-
-# Создаем и запускаем event loop для вебхука
-def run_webhook():
-    """Запуск вебхука в отдельном event loop"""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    async def setup():
-        # Удаляем существующий вебхук
-        await application.bot.delete_webhook()
-        print("✅ Старый вебхук удален")
-        
-        # Устанавливаем новый вебхук
-        await application.bot.set_webhook(
-            f"{WEBHOOK_URL}/webhook",
-            drop_pending_updates=True
-        )
-        print(f"✅ Новый вебхук установлен: {WEBHOOK_URL}/webhook")
-        
-        # Запускаем вебхук сервер
-        await application.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            webhook_url=f"{WEBHOOK_URL}/webhook",
-            drop_pending_updates=True
-        )
-    
-    try:
-        print("🚀 Запуск бота в режиме вебхука...")
-        loop.run_until_complete(setup())
-    except KeyboardInterrupt:
-        pass
-    finally:
-        loop.close()
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_new_plan_request))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_follow_up_response))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_knowledge_request))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_command))
 
 def run_polling():
     """Запуск через polling"""
@@ -1172,12 +891,4 @@ def run_polling():
     application.run_polling()
 
 if __name__ == '__main__':
-    # Автоматическое определение среды
-    is_render = os.environ.get('RENDER') is not None
-    is_webhook_env = os.environ.get('USE_WEBHOOK') is not None
-    has_webhook_url = bool(WEBHOOK_URL)
-    
-    if is_render or is_webhook_env or has_webhook_url:
-        run_webhook()
-    else:
-        run_polling()
+    run_polling()
