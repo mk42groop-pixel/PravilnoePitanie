@@ -93,7 +93,7 @@ class SubscriptionChecker:
 class NutritionProfessor:
     def __init__(self):
         self.required_days = ['понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота', 'воскресенье']
-        self.meals = ['завтрак', 'перекус', 'обед', 'перекус', 'ужиn']
+        self.meals = ['завтрак', 'перекус', 'обед', 'перекус', 'ужин']
     
     def calculate_bmi(self, height: int, weight: int) -> float:
         """Расчет индекса массы тела"""
@@ -243,12 +243,12 @@ class AdminPanel:
                     "💡 Для продолжения journey подпишитесь на канал:\n"
                     "👉 @ppsupershef\n\n"
                     "Спасибо за заказ! ❤️\n"
-                    "Хотите создать еще один план?",
-                    reply_markup=ReplyKeyboardMarkup([
-                        ["🆕 Новый план"], 
-                        ["📢 Наш канал"]
-                    ], resize_keyboard=True)
-                )
+                    "Хотите создать еще один план?"
+                ),
+                reply_markup=ReplyKeyboardMarkup([
+                    ["🆕 Новый план"], 
+                    ["📢 Наш канал"]
+                ], resize_keyboard=True)
             )
             
             order['status'] = 'delivered'
@@ -449,6 +449,20 @@ def create_activity_keyboard(show_back: bool = False):
         keyboard.append(["◀️ Назад"])
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
+def create_confirmation_keyboard():
+    keyboard = [["✅ Да, все верно", "✏️ Редактировать параметры"]]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+def create_edit_keyboard():
+    keyboard = [
+        ["🎯 Цель", "🥗 Тип диеты"],
+        ["⚠️ Аллергии", "👤 Пол"],
+        ["🎂 Возраст", "📏 Рост"],
+        ["⚖️ Вес", "🏃‍♂️ Активность"],
+        ["✅ Завершить редактирование"]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
 def create_packages_keyboard():
     keyboard = [
         ["🎯 Базовый - 100₽", "🚀 Стандартный - 200₽"],
@@ -584,8 +598,244 @@ async def process_subscription_check(update: Update, context: ContextTypes.DEFAU
     
     return SUBSCRIPTION_CHECK
 
-# Обработчики состояний анкеты (process_goal, process_diet, process_allergies, process_gender, process_age, process_height, process_weight, process_activity)
-# ... (код обработчиков состояний остается таким же как в предыдущей версии) ...
+# Обработчики состояний анкеты
+async def process_goal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обработка выбора цели"""
+    text = update.message.text
+    
+    if text == "◀️ Назад":
+        await update.message.reply_text(
+            "Начинаем заново! Выберите вашу цель:",
+            reply_markup=create_goal_keyboard()
+        )
+        return GOAL
+    
+    if text not in ['похудение', 'поддержание веса', 'набор мышечной массы']:
+        await update.message.reply_text("Пожалуйста, выберите цель из предложенных вариантов:")
+        return GOAL
+    
+    context.user_data['goal'] = text
+    
+    progress_text = get_progress_text(context.user_data, 'goal')
+    await update.message.reply_text(
+        f"{progress_text}\n\n"
+        "🥗 Теперь выберите тип диеты:",
+        reply_markup=create_diet_keyboard(show_back=True)
+    )
+    return DIET
+
+async def process_diet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обработка выбора диеты"""
+    text = update.message.text
+    
+    if text == "◀️ Назад":
+        progress_text = get_progress_text(context.user_data, 'goal')
+        await update.message.reply_text(
+            f"{progress_text}\n\n"
+            "Выберите вашу цель:",
+            reply_markup=create_goal_keyboard(show_back=True)
+        )
+        return GOAL
+    
+    if text not in ['стандарт', 'вегетарианская', 'веганская', 'безглютеновая', 'низкоуглеводная']:
+        await update.message.reply_text("Пожалуйста, выберите тип диеты из предложенных вариантов:")
+        return DIET
+    
+    context.user_data['diet'] = text
+    
+    progress_text = get_progress_text(context.user_data, 'diet')
+    await update.message.reply_text(
+        f"{progress_text}\n\n"
+        "⚠️ Есть ли у вас аллергии или непереносимости?",
+        reply_markup=create_allergies_keyboard(show_back=True)
+    )
+    return ALLERGIES
+
+async def process_allergies(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обработка выбора аллергий"""
+    text = update.message.text
+    
+    if text == "◀️ Назад":
+        progress_text = get_progress_text(context.user_data, 'diet')
+        await update.message.reply_text(
+            f"{progress_text}\n\n"
+            "Выберите тип диеты:",
+            reply_markup=create_diet_keyboard(show_back=True)
+        )
+        return DIET
+    
+    if text not in ['нет', 'орехи', 'молочные продукты', 'яйца', 'рыба/морепродукты']:
+        await update.message.reply_text("Пожалуйста, выберите вариант из предложенных:")
+        return ALLERGIES
+    
+    context.user_data['allergies'] = text
+    
+    progress_text = get_progress_text(context.user_data, 'allergies')
+    await update.message.reply_text(
+        f"{progress_text}\n\n"
+        "👤 Укажите ваш пол:",
+        reply_markup=create_gender_keyboard(show_back=True)
+    )
+    return GENDER
+
+async def process_gender(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обработка выбора пола"""
+    text = update.message.text
+    
+    if text == "◀️ Назад":
+        progress_text = get_progress_text(context.user_data, 'allergies')
+        await update.message.reply_text(
+            f"{progress_text}\n\n"
+            "Выберите аллергии:",
+            reply_markup=create_allergies_keyboard(show_back=True)
+        )
+        return ALLERGIES
+    
+    if text not in ['мужской', 'женский']:
+        await update.message.reply_text("Пожалуйста, выберите пол из предложенных вариантов:")
+        return GENDER
+    
+    context.user_data['gender'] = text
+    
+    progress_text = get_progress_text(context.user_data, 'gender')
+    await update.message.reply_text(
+        f"{progress_text}\n\n"
+        "🎂 Укажите ваш возраст (полных лет, от 10 до 100):",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    return AGE
+
+async def process_age(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обработка возраста"""
+    text = update.message.text
+    
+    if text == "◀️ Назад":
+        progress_text = get_progress_text(context.user_data, 'gender')
+        await update.message.reply_text(
+            f"{progress_text}\n\n"
+            "Выберите пол:",
+            reply_markup=create_gender_keyboard(show_back=True)
+        )
+        return GENDER
+    
+    try:
+        age = int(text)
+        if age < 10 or age > 100:
+            await update.message.reply_text("Пожалуйста, введите реальный возраст (10-100 лет):")
+            return AGE
+    except ValueError:
+        await update.message.reply_text("Пожалуйста, введите число:")
+        return AGE
+    
+    context.user_data['age'] = age
+    
+    progress_text = get_progress_text(context.user_data, 'age')
+    await update.message.reply_text(
+        f"{progress_text}\n\n"
+        "📏 Укажите ваш рост (в см, от 100 до 250):"
+    )
+    return HEIGHT
+
+async def process_height(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обработка роста"""
+    text = update.message.text
+    
+    if text == "◀️ Назад":
+        progress_text = get_progress_text(context.user_data, 'age')
+        await update.message.reply_text(
+            f"{progress_text}\n\n"
+            "Введите возраст:"
+        )
+        return AGE
+    
+    try:
+        height = int(text)
+        if height < 100 or height > 250:
+            await update.message.reply_text("Пожалуйста, введите реальный рост (100-250 см):")
+            return HEIGHT
+    except ValueError:
+        await update.message.reply_text("Пожалуйста, введите число:")
+        return HEIGHT
+    
+    context.user_data['height'] = height
+    
+    progress_text = get_progress_text(context.user_data, 'height')
+    await update.message.reply_text(
+        f"{progress_text}\n\n"
+        "⚖️ Укажите ваш вес (в кг, от 30 до 300):"
+    )
+    return WEIGHT
+
+async def process_weight(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обработка веса"""
+    text = update.message.text
+    
+    if text == "◀️ Назад":
+        progress_text = get_progress_text(context.user_data, 'height')
+        await update.message.reply_text(
+            f"{progress_text}\n\n"
+            "Введите рост:"
+        )
+        return HEIGHT
+    
+    try:
+        weight = int(text)
+        if weight < 30 or weight > 300:
+            await update.message.reply_text("Пожалуйста, введите реальный вес (30-300 кг):")
+            return WEIGHT
+    except ValueError:
+        await update.message.reply_text("Пожалуйста, введите число:")
+        return WEIGHT
+    
+    context.user_data['weight'] = weight
+    
+    progress_text = get_progress_text(context.user_data, 'weight')
+    await update.message.reply_text(
+        f"{progress_text}\n\n"
+        "🏃‍♂️ Укажите ваш уровень физической активности:",
+        reply_markup=create_activity_keyboard(show_back=True)
+    )
+    return ACTIVITY
+
+async def process_activity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обработка уровня активности"""
+    text = update.message.text
+    
+    if text == "◀️ Назад":
+        progress_text = get_progress_text(context.user_data, 'weight')
+        await update.message.reply_text(
+            f"{progress_text}\n\n"
+            "Введите вес:"
+        )
+        return WEIGHT
+    
+    if text not in ['сидячий', 'умеренная', 'активный', 'очень активный']:
+        await update.message.reply_text("Пожалуйста, выберите уровень активности из предложенных вариантов:")
+        return ACTIVITY
+    
+    context.user_data['activity'] = text
+    
+    # Показываем все введенные параметры для подтверждения
+    professor = NutritionProfessor()
+    calories = professor.calculate_calories(context.user_data)
+    bju = professor.calculate_bju(context.user_data, calories)
+    water = professor.calculate_water_intake(int(context.user_data['weight']))
+    
+    progress_text = get_progress_text(context.user_data, 'activity')
+    confirmation_text = (
+        f"{progress_text}\n\n"
+        "📊 РАСЧЕТНЫЕ ПОКАЗАТЕЛИ:\n"
+        f"   • 🔥 Суточная норма калорий: {calories} ккал\n"
+        f"   • 🥚 Белки: {bju['protein']}г | 🥑 Жиры: {bju['fat']}г | 🌾 Углеводы: {bju['carbs']}г\n"
+        f"   • 💧 Норма воды: {water['avg_water']} мл/день\n\n"
+        "✅ Все данные введены! Проверьте правильность и подтвердите:"
+    )
+    
+    await update.message.reply_text(
+        confirmation_text,
+        reply_markup=create_confirmation_keyboard()
+    )
+    return CONFIRMATION
 
 async def process_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Обработка подтверждения параметров"""
@@ -633,6 +883,53 @@ async def process_confirmation(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("Пожалуйста, выберите вариант из предложенных:")
         return CONFIRMATION
 
+async def process_edit_params(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обработка редактирования параметров"""
+    text = update.message.text
+    
+    edit_handlers = {
+        "🎯 Цель": (GOAL, create_goal_keyboard(show_back=True), "Выберите цель:"),
+        "🥗 Тип диеты": (DIET, create_diet_keyboard(show_back=True), "Выберите тип диеты:"),
+        "⚠️ Аллергии": (ALLERGIES, create_allergies_keyboard(show_back=True), "Выберите аллергии:"),
+        "👤 Пол": (GENDER, create_gender_keyboard(show_back=True), "Выберите пол:"),
+        "🎂 Возраст": (AGE, ReplyKeyboardRemove(), "Введите возраст:"),
+        "📏 Рост": (HEIGHT, ReplyKeyboardRemove(), "Введите рост:"),
+        "⚖️ Вес": (WEIGHT, ReplyKeyboardRemove(), "Введите вес:"),
+        "🏃‍♂️ Активность": (ACTIVITY, create_activity_keyboard(show_back=True), "Выберите активность:")
+    }
+    
+    if text in edit_handlers:
+        next_state, keyboard, message = edit_handlers[text]
+        await update.message.reply_text(message, reply_markup=keyboard)
+        return next_state
+    
+    elif text == "✅ Завершить редактирование":
+        # Возвращаемся к подтверждению
+        professor = NutritionProfessor()
+        calories = professor.calculate_calories(context.user_data)
+        bju = professor.calculate_bju(context.user_data, calories)
+        water = professor.calculate_water_intake(int(context.user_data['weight']))
+        
+        progress_text = get_progress_text(context.user_data)
+        confirmation_text = (
+            f"{progress_text}\n\n"
+            "📊 РАСЧЕТНЫЕ ПОКАЗАТЕЛИ:\n"
+            f"   • 🔥 Суточная норма калорий: {calories} ккал\n"
+            f"   • 🥚 Белки: {bju['protein']}г | 🥑 Жиры: {bju['fat']}г | 🌾 Углеводы: {bju['carbs']}г\n"
+            f"   • 💧 Норма воды: {water['avg_water']} мл/день\n\n"
+            "✅ Все данные введены! Проверьте правильность и подтвердите:"
+        )
+        
+        await update.message.reply_text(
+            confirmation_text,
+            reply_markup=create_confirmation_keyboard()
+        )
+        return CONFIRMATION
+    
+    else:
+        await update.message.reply_text("Пожалуйста, выберите параметр для редактирования:")
+        return EDIT_PARAMS
+
 async def process_package_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Обработка выбора пакета"""
     text = update.message.text
@@ -641,7 +938,23 @@ async def process_package_selection(update: Update, context: ContextTypes.DEFAUL
         return await show_confirmation(update, context)
     
     if text == "❓ Сравнить пакеты":
-        return await show_package_comparison(update, context)
+        comparison_text = (
+            "📊 СРАВНЕНИЕ ПАКЕТОВ:\n\n"
+            "🎯 БАЗОВЫЙ (100₽):\n"
+            "• План питания на 7 дней\n"
+            "• Расчет БЖУ и калорий\n"
+            "• Рекомендации по водному режиму\n\n"
+            "🚀 СТАНДАРТНЫЙ (200₽):\n"
+            "• Всё из Базового +\n"
+            "• Подробные рецепты на 7 дней\n\n"
+            "👑 ПРЕМИУМ (300₽):\n"
+            "• Всё из Стандартного +\n"
+            "• Умный список покупок\n"
+            "• Детальный водный режим\n"
+            "• Бонус: гайд по ПП"
+        )
+        await update.message.reply_text(comparison_text)
+        return SELECT_PACKAGE
     
     package_map = {
         "🎯 Базовый - 100₽": "basic",
@@ -674,6 +987,28 @@ async def process_package_selection(update: Update, context: ContextTypes.DEFAUL
     
     await update.message.reply_text("Пожалуйста, выберите пакет из предложенных:")
     return SELECT_PACKAGE
+
+async def show_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать подтверждение анкеты"""
+    professor = NutritionProfessor()
+    calories = professor.calculate_calories(context.user_data)
+    bju = professor.calculate_bju(context.user_data, calories)
+    water = professor.calculate_water_intake(int(context.user_data['weight']))
+    
+    progress_text = get_progress_text(context.user_data)
+    confirmation_text = (
+        f"{progress_text}\n\n"
+        "📊 РАСЧЕТНЫЕ ПОКАЗАТЕЛИ:\n"
+        f"   • 🔥 Суточная норма калорий: {calories} ккал\n"
+        f"   • 🥚 Белки: {bju['protein']}г | 🥑 Жиры: {bju['fat']}г | 🌾 Углеводы: {bju['carbs']}г\n"
+        f"   • 💧 Норма воды: {water['avg_water']} мл/день\n\n"
+        "✅ Все данные введены! Проверьте правильность и подтвердите:"
+    )
+    
+    await update.message.reply_text(
+        confirmation_text,
+        reply_markup=create_confirmation_keyboard()
+    )
 
 async def process_payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Обработка выбора способа оплаты"""
@@ -708,6 +1043,30 @@ async def process_payment_method(update: Update, context: ContextTypes.DEFAULT_T
     
     context.user_data.clear()
     return ConversationHandler.END
+
+async def show_package_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать выбор пакетов"""
+    package_selection_text = (
+        "📦 ВЫБЕРИТЕ ПАКЕТ УСЛУГ:\n\n"
+        "🎯 **Базовый пакет** - 100₽\n"
+        "• План питания на 7 дней\n"
+        "• Расчет БЖУ и калорий\n"
+        "• Рекомендации по водному режиму\n\n"
+        "🚀 **Стандартный пакет** - 200₽\n"  
+        "• Всё из Базового +\n"
+        "• Подробные рецепты на 7 дней\n\n"
+        "👑 **Премиум пакет** - 300₽\n"
+        "• Всё из Стандартного +\n"
+        "• Умный список покупок\n"
+        "• Детальный водный режим\n"
+        "• Бонус: гайд по ПП\n\n"
+        "Выберите подходящий вариант:"
+    )
+    
+    await update.message.reply_text(
+        package_selection_text,
+        reply_markup=create_packages_keyboard()
+    )
 
 async def handle_new_plan_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка запроса на новый план"""
@@ -801,7 +1160,7 @@ async def confirm_payment(update: Update, context: ContextTypes.DEFAULT_TYPE, or
             text=(
                 "✅ Оплата подтверждена! Ваш план поставлен в очередь на формирование.\n\n"
                 "⏱ План будет готов в течение 24 часов\n"
-                "📬 Вы получите уведомление в этом чат\n\n"
+                "📬 Вы получите уведомление в этом чате\n\n"
                 "📢 Подписывайтесь на наш канал:\n"
                 "👉 @ppsupershef"
             )
@@ -873,6 +1232,7 @@ conv_handler = ConversationHandler(
         WEIGHT: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_weight)],
         ACTIVITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_activity)],
         CONFIRMATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_confirmation)],
+        EDIT_PARAMS: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_edit_params)],
         SELECT_PACKAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_package_selection)],
         PAYMENT_METHOD: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_payment_method)],
     },
